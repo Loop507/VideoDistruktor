@@ -8,9 +8,10 @@ import cv2 # Importa OpenCV qui
 
 
 # Configurazione della pagina
-st.set_page_config(page_title="VideoDistruktor - Video Edition", layout="centered")
+st.set_page_config(page_title="VideoDistruktor by loop507", layout="centered")
 
-st.title("🎬🔥 VideoDistruktor")
+# Modifica del titolo con caratteri più piccoli per "by loop507"
+st.markdown("<h1>🎬🔥 VideoDistruktor <span style='font-size:0.5em;'>by loop507</span></h1>", unsafe_allow_html=True)
 st.write("Carica un video e genera versioni glitchate: VHS, Distruttivo, Noise, Combinato o Random!")
 
 # File uploader per video
@@ -170,20 +171,19 @@ def process_video(video_path, effect_type, params, max_frames=None):
                     processed_frame = glitch_noise_frame(frame, *params)
                 elif effect_type == 'combined':
                     current_frame_to_process = frame
-                    global_intensity = params.get("global_intensity", 1.0)
+                    
+                    # Estrai i parametri specifici per gli effetti combinati
+                    vhs_intensity = params.get("vhs_intensity", 1.0)
+                    vhs_scanlines = params.get("vhs_scanlines", 1.0)
+                    vhs_colors = params.get("vhs_colors", 1.0)
 
-                    # Mappa l'intensità globale ai parametri specifici
-                    vhs_intensity = 0.5 + 1.5 * global_intensity
-                    vhs_scanlines = 0.5 + 1.5 * global_intensity
-                    vhs_colors = 0.5 + 1.5 * global_intensity
+                    dest_block_size = params.get("dest_block_size", 1.0)
+                    dest_num_blocks = params.get("dest_num_blocks", 1.0)
+                    dest_displacement = params.get("dest_displacement", 1.0)
 
-                    dest_block_size = 0.5 + 1.5 * global_intensity
-                    dest_num_blocks = 0.5 + 1.5 * global_intensity
-                    dest_displacement = 0.5 + 1.5 * global_intensity
-
-                    noise_intensity_val = 0.5 + 1.5 * global_intensity
-                    noise_coverage_val = 0.5 + 1.5 * global_intensity
-                    noise_chaos_val = min(1.0, 0.2 + 0.8 * global_intensity) # Caos va da 0.2 a 1.0
+                    noise_intensity_val = params.get("noise_intensity", 1.0)
+                    noise_coverage_val = params.get("noise_coverage", 1.0)
+                    noise_chaos_val = params.get("noise_chaos", 0.5)
 
                     if params.get("apply_vhs"):
                         current_frame_to_process = glitch_vhs_frame(current_frame_to_process, vhs_intensity, vhs_scanlines, vhs_colors)
@@ -349,19 +349,60 @@ if uploaded_file is not None:
             st.markdown("**Configura il tuo Glitch Combinato**")
             
             apply_vhs = st.checkbox("📺 Applica effetto VHS", value=True, key="chk_vhs_1")
-            apply_distruttivo = st.checkbox("💥 Applica effetto Distruttivo", value=True, key="chk_dist_1")
-            apply_noise = st.checkbox("🌀 Applica effetto Noise", value=True, key="chk_noise_1")
+            if apply_vhs:
+                st.markdown("--- VHS Settings ---")
+                col_vhs1, col_vhs2, col_vhs3 = st.columns(3)
+                with col_vhs1:
+                    vhs_intensity_c = st.slider("VHS Intensità Distorsione", 0.0, 2.0, 1.0, 0.1, key="vhs_int_c")
+                with col_vhs2:
+                    vhs_scanlines_c = st.slider("VHS Frequenza Scanlines", 0.0, 2.0, 1.0, 0.1, key="vhs_scan_c")
+                with col_vhs3:
+                    vhs_colors_c = st.slider("VHS Separazione Colori", 0.0, 2.0, 1.0, 0.1, key="vhs_col_c")
             
-            global_intensity_combined = st.slider("Livello di Intensità Globale", 0.0, 2.0, 1.0, 0.1, 
-                                                  help="Controlla l'intensità di tutti gli effetti attivi. 0.0 = minima, 2.0 = massima.",
-                                                  key="global_intensity_combined_1")
+            st.markdown("---") # Separatore
+            
+            apply_distruttivo = st.checkbox("💥 Applica effetto Distruttivo", value=True, key="chk_dist_1")
+            if apply_distruttivo:
+                st.markdown("--- Distruttivo Settings ---")
+                col_dest1, col_dest2, col_dest3 = st.columns(3)
+                with col_dest1:
+                    dest_blocks_c = st.slider("Distr. Dimensione Blocchi", 0.0, 2.0, 1.0, 0.1, key="dest_size_c")
+                with col_dest2:
+                    dest_number_c = st.slider("Distr. Numero Blocchi", 0.0, 2.0, 1.0, 0.1, key="dest_num_c")
+                with col_dest3:
+                    dest_displacement_c = st.slider("Distr. Spostamento", 0.0, 2.0, 1.0, 0.1, key="dest_disp_c")
+            
+            st.markdown("---") # Separatore
+
+            apply_noise = st.checkbox("🌀 Applica effetto Noise", value=True, key="chk_noise_1")
+            if apply_noise:
+                st.markdown("--- Noise Settings ---")
+                col_noise1, col_noise2, col_noise3 = st.columns(3)
+                with col_noise1:
+                    noise_intensity_c = st.slider("Noise Intensità Rumore", 0.0, 2.0, 1.0, 0.1, key="noise_int_c")
+                with col_noise2:
+                    noise_coverage_c = st.slider("Noise Copertura", 0.0, 2.0, 1.0, 0.1, key="noise_cov_c")
+                with col_noise3:
+                    noise_chaos_c = st.slider("Noise Caos", 0.0, 1.0, 0.5, 0.1, key="noise_chaos_c")
+            
+            st.markdown("---") # Separatore
             
             if st.button("🎬 Genera Video Combinato", key="btn_combined_1"):
                 combined_params = {
                     "apply_vhs": apply_vhs,
+                    "vhs_intensity": vhs_intensity_c if apply_vhs else 1.0,
+                    "vhs_scanlines": vhs_scanlines_c if apply_vhs else 1.0,
+                    "vhs_colors": vhs_colors_c if apply_vhs else 1.0,
+
                     "apply_distruttivo": apply_distruttivo,
+                    "dest_block_size": dest_blocks_c if apply_distruttivo else 1.0,
+                    "dest_num_blocks": dest_number_c if apply_distruttivo else 1.0,
+                    "dest_displacement": dest_displacement_c if apply_distruttivo else 1.0,
+
                     "apply_noise": apply_noise,
-                    "global_intensity": global_intensity_combined
+                    "noise_intensity": noise_intensity_c if apply_noise else 1.0,
+                    "noise_coverage": noise_coverage_c if apply_noise else 1.0,
+                    "noise_chaos": noise_chaos_c if apply_noise else 0.5
                 }
                 
                 with st.spinner("✨ Processando video con effetti combinati... Questo potrebbe richiedere tempo."):
