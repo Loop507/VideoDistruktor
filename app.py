@@ -16,10 +16,8 @@ except ImportError as e:
     st.stop() # Ferma l'esecuzione se OpenCV non è disponibile
 
 # Configurazione della pagina
-# Ho aggiornato il page_title con il nuovo nome
 st.set_page_config(page_title="VideoDistruktor - Video Edition", layout="centered")
 
-# Ho aggiornato il titolo principale dell'applicazione
 st.title("🎬🔥 VideoDistruktor")
 st.write("Carica un video e genera versioni glitchate: VHS, Distruttivo e Random!")
 
@@ -34,7 +32,7 @@ def pil_to_frame(pil_img):
     """Converte PIL Image (RGB) in frame OpenCV (BGR)"""
     return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
-# --- Funzioni degli effetti ottimizzate per leggerezza (rimangono invariate) ---
+# --- Funzioni degli effetti ottimizzate (invariate, ma usate diversamente) ---
 
 def glitch_vhs_frame(frame, intensity=1.0, scanline_freq=1.0, color_shift=1.0):
     """Applica effetto VHS a un singolo frame (ottimizzato)"""
@@ -180,25 +178,61 @@ def process_video(video_path, effect_type, params, max_frames=None):
             if not ret:
                 break
             
-            processed_frame = frame
+            processed_frame = frame # Default: frame originale in caso di problemi
             try:
-                if effect_type == 'vhs':
-                    processed_frame = glitch_vhs_frame(frame, *params)
-                elif effect_type == 'distruttivo':
-                    processed_frame = glitch_distruttivo_frame(frame, *params)
-                elif effect_type == 'noise':
-                    processed_frame = glitch_noise_frame(frame, *params)
-                else:
+                # --- LOGICA MODIFICATA PER GLI EFFETTI ---
+                if effect_type == 'combined':
+                    current_frame_to_process = frame # Inizia con il frame originale
+                    global_intensity = params.get("global_intensity", 1.0)
+
+                    # Mappa l'intensità globale ai parametri specifici di ciascun effetto
+                    # Questi valori sono stati scelti per dare un buon range di controllo
+                    # Puoi modificarli per ottenere effetti diversi
+                    vhs_intensity = 0.5 + 1.5 * global_intensity
+                    vhs_scanlines = 0.5 + 1.5 * global_intensity
+                    vhs_colors = 0.5 + 1.5 * global_intensity
+
+                    dest_block_size = 0.5 + 1.5 * global_intensity
+                    dest_num_blocks = 0.5 + 1.5 * global_intensity
+                    dest_displacement = 0.5 + 1.5 * global_intensity
+
+                    noise_intensity_val = 0.5 + 1.5 * global_intensity
+                    noise_coverage_val = 0.5 + 1.5 * global_intensity
+                    noise_chaos_val = min(1.0, 0.2 + 0.8 * global_intensity) # Caos max 1.0
+
+
+                    if params.get("apply_vhs"):
+                        current_frame_to_process = glitch_vhs_frame(current_frame_to_process, vhs_intensity, vhs_scanlines, vhs_colors)
+                    
+                    if params.get("apply_distruttivo"):
+                        current_frame_to_process = glitch_distruttivo_frame(current_frame_to_process, dest_block_size, dest_num_blocks, dest_displacement)
+                    
+                    if params.get("apply_noise"):
+                        current_frame_to_process = glitch_noise_frame(current_frame_to_process, noise_intensity_val, noise_coverage_val, noise_chaos_val)
+                    
+                    processed_frame = current_frame_to_process
+
+                elif effect_type == 'random':
+                    # L'effetto random rimane come prima
                     effects = [
                         (glitch_vhs_frame, random.uniform(0.5, 1.5), random.uniform(0.5, 1.5), random.uniform(0.5, 1.5)),
                         (glitch_distruttivo_frame, random.uniform(0.5, 1.5), random.uniform(0.5, 1.5), random.uniform(0.5, 1.5)),
                         (glitch_noise_frame, random.uniform(0.5, 1.5), random.uniform(0.5, 1.5), random.uniform(0.5, 1.5))
                     ]
+                    # I parametri del random sono ancora scalati dal livello di casualità (params[0])
                     chosen_effect, p1, p2, p3 = random.choice(effects)
                     processed_frame = chosen_effect(frame, p1 * params[0], p2 * params[0], p3 * params[0])
+                # --- FINE LOGICA MODIFICATA ---
+                
+                # Questa sezione `else` non sarà più raggiunta dai pulsanti
+                # perché i controlli singoli sono stati rimossi.
+                # Rimane solo se volessi riaggiungere un singolo effetto in futuro.
+                else: 
+                     st.warning(f"Tipo di effetto '{effect_type}' non riconosciuto.")
+                     processed_frame = frame
             except Exception as e:
                 st.warning(f"⚠️ Errore durante l'applicazione dell'effetto al frame {frame_count}: {e}. Skipping frame.")
-                processed_frame = frame
+                processed_frame = frame # Usa il frame originale se l'effetto fallisce
             
             out.write(processed_frame)
             
@@ -209,7 +243,7 @@ def process_video(video_path, effect_type, params, max_frames=None):
         
     except Exception as e:
         st.error(f"Errore critico durante il processing del video: {e}")
-        output_path = None
+        output_path = None # Indica che non è stato generato un output valido
     finally:
         cap.release()
         if 'out' in locals() and out.isOpened():
@@ -240,7 +274,7 @@ if uploaded_file is not None:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration = total_frames / fps if fps > 0 else 0
         cap.release()
-        
+
         st.success(f"✅ Video caricato!")
         st.info(f"📊 **Dettagli video:** {width}x{height} - {fps} FPS - {duration:.1f}s - {total_frames} frames")
         
@@ -270,95 +304,57 @@ if uploaded_file is not None:
         processing_duration = (max_frames_to_process / fps) if fps > 0 else 0
         st.info(f"📅 Verranno processati {max_frames_to_process} frames ({processing_duration:.1f}s di video)")
         
+        # --- CONTROLLI EFFETTI: MODIFICATI ---
         st.markdown("### 🎛️ Controlli Effetti")
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📺 VHS", "💥 Distruttivo", "🌀 Noise", "🎲 Random"])
+        # Tabs per i diversi effetti: ora 'Glitch Combinato' e 'Random'
+        tab_combined, tab_random = st.tabs(["✨ Glitch Combinato", "🎲 Random"])
         
-        with tab1:
-            st.markdown("**Effetto VHS Glitch**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                vhs_intensity = st.slider("Intensità Distorsione", 0.0, 2.0, 1.0, 0.1, key="vhs_int_v2")
-            with col2:
-                vhs_scanlines = st.slider("Frequenza Scanlines", 0.0, 2.0, 1.0, 0.1, key="vhs_scan_v2")
-            with col3:
-                vhs_colors = st.slider("Separazione Colori", 0.0, 2.0, 1.0, 0.1, key="vhs_col_v2")
+        with tab_combined:
+            st.markdown("**Configura il tuo Glitch Combinato**")
             
-            if st.button("🎬 Genera Video VHS", key="btn_vhs_v2"):
-                with st.spinner("📺 Processando video con effetto VHS... Questo potrebbe richiedere tempo."):
-                    output_path_processed = process_video(video_path, 'vhs', (vhs_intensity, vhs_scanlines, vhs_colors), max_frames_to_process)
+            # Checkbox per attivare/disattivare gli effetti
+            apply_vhs = st.checkbox("📺 Applica effetto VHS", value=True, key="chk_vhs")
+            apply_distruttivo = st.checkbox("💥 Applica effetto Distruttivo", value=True, key="chk_dist")
+            apply_noise = st.checkbox("🌀 Applica effetto Noise", value=True, key="chk_noise")
+            
+            # Slider per l'intensità globale
+            global_intensity_combined = st.slider("Livello di Intensità Globale", 0.0, 2.0, 1.0, 0.1, 
+                                                  help="Controlla l'intensità di tutti gli effetti attivi. 0.0 = minima, 2.0 = massima.",
+                                                  key="global_intensity_combined")
+            
+            if st.button("🎬 Genera Video Combinato", key="btn_combined"):
+                # Prepara i parametri per la funzione process_video
+                combined_params = {
+                    "apply_vhs": apply_vhs,
+                    "apply_distruttivo": apply_distruttivo,
+                    "apply_noise": apply_noise,
+                    "global_intensity": global_intensity_combined
+                }
+                
+                with st.spinner("✨ Processando video con effetti combinati... Questo potrebbe richiedere tempo."):
+                    output_path_processed = process_video(video_path, 'combined', combined_params, max_frames_to_process)
                     
                     if output_path_processed and os.path.exists(output_path_processed):
                         with open(output_path_processed, 'rb') as f:
                             st.download_button(
-                                "⬇️ Scarica Video VHS",
+                                "⬇️ Scarica Video Combinato",
                                 f.read(),
-                                "vhs_glitch_video.mp4",
+                                "combined_glitch_video.mp4",
                                 "video/mp4"
                             )
                         os.unlink(output_path_processed)
                     else:
-                        st.error("❌ Errore nella generazione del video VHS.")
+                        st.error("❌ Errore nella generazione del video combinato.")
         
-        with tab2:
-            st.markdown("**Effetto Distruttivo**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                dest_blocks = st.slider("Dimensione Blocchi", 0.0, 2.0, 1.0, 0.1, key="dest_size_v2")
-            with col2:
-                dest_number = st.slider("Numero Blocchi", 0.0, 2.0, 1.0, 0.1, key="dest_num_v2")
-            with col3:
-                dest_displacement = st.slider("Spostamento", 0.0, 2.0, 1.0, 0.1, key="dest_disp_v2")
-            
-            if st.button("🎬 Genera Video Distruttivo", key="btn_dest_v2"):
-                with st.spinner("💥 Processando video con effetto Distruttivo... Questo potrebbe richiedere tempo."):
-                    output_path_processed = process_video(video_path, 'distruttivo', (dest_blocks, dest_number, dest_displacement), max_frames_to_process)
-                    
-                    if output_path_processed and os.path.exists(output_path_processed):
-                        with open(output_path_processed, 'rb') as f:
-                            st.download_button(
-                                "⬇️ Scarica Video Distruttivo",
-                                f.read(),
-                                "distruttivo_glitch_video.mp4",
-                                "video/mp4"
-                            )
-                        os.unlink(output_path_processed)
-                    else:
-                        st.error("❌ Errore nella generazione del video Distruttivo.")
-        
-        with tab3:
-            st.markdown("**Effetto Noise**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                noise_intensity = st.slider("Intensità Rumore", 0.0, 2.0, 1.0, 0.1, key="noise_int_v2")
-            with col2:
-                noise_coverage = st.slider("Copertura", 0.0, 2.0, 1.0, 0.1, key="noise_cov_v2")
-            with col3:
-                noise_chaos = st.slider("Caos", 0.0, 1.0, 0.5, 0.1, key="noise_chaos_v2")
-            
-            if st.button("🎬 Genera Video Noise", key="btn_noise_v2"):
-                with st.spinner("🌀 Processando video con effetto Noise... Questo potrebbe richiedere tempo."):
-                    output_path_processed = process_video(video_path, 'noise', (noise_intensity, noise_coverage, noise_chaos), max_frames_to_process)
-                    
-                    if output_path_processed and os.path.exists(output_path_processed):
-                        with open(output_path_processed, 'rb') as f:
-                            st.download_button(
-                                "⬇️ Scarica Video Noise",
-                                f.read(),
-                                "noise_glitch_video.mp4",
-                                "video/mp4"
-                            )
-                        os.unlink(output_path_processed)
-                    else:
-                        st.error("❌ Errore nella generazione del video Noise.")
-        
-        with tab4:
+        with tab_random:
             st.markdown("**Effetto Random (Combo Casuale)**")
             random_level = st.slider("Livello Casualità", 0.0, 2.0, 1.0, 0.1, key="random_lev_v2")
-            st.info("🎲 Ogni frame avrà un effetto casuale diverso!")
+            st.info("🎲 Ogni frame avrà un effetto casuale diverso con intensità proporzionale al Livello Casualità!")
             
             if st.button("🎬 Genera Video Random", key="btn_random_v2"):
                 with st.spinner("🎲 Processando video con effetti casuali... Questo potrebbe richiedere tempo."):
+                    # Per l'effetto random, params è una tupla con solo il livello di casualità
                     output_path_processed = process_video(video_path, 'random', (random_level,), max_frames_to_process)
                     
                     if output_path_processed and os.path.exists(output_path_processed):
@@ -385,9 +381,8 @@ else:
     st.markdown("""
     ### 📋 Istruzioni:
     1. **Carica un video** nei formati supportati (MP4, AVI, MOV, MKV).
-    2. **Regola i parametri** degli effetti usando i controlli nelle tab.
-    3. **Scegli l'effetto** desiderato e clicca per generare il video glitchato.
-    4. **Scarica il risultato** una volta completato il processo.
+    2. **Seleziona gli effetti** nella tab "Glitch Combinato" e regola il "Livello di Intensità Globale". Oppure scegli l'effetto "Random".
+    3. **Genera il video** e scarica il risultato.
     
     ### ⚠️ Note importanti:
     - L'elaborazione video può richiedere **molto tempo** e risorse, specialmente per video lunghi o con molti frames.
@@ -397,6 +392,5 @@ else:
 
 # Footer
 st.markdown("---")
-# Ho aggiornato il footer con il nuovo nome
 st.markdown("🎬🔥 **VideoDistruktor** - Glitcha i tuoi video!")
 st.markdown("*💡 Perfetto per creare effetti visual disturbati e atmosfere cyberpunk!*")
