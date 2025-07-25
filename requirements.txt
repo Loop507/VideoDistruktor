@@ -4,3 +4,4 @@ numpy==1.26.4
 pillow
 setuptools
 wheel
+moviepy
