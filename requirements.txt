@@ -2,4 +2,3 @@ streamlit
 opencv-python-headless==4.8.1.78
 pillow
 numpy
-libgl1-mesa-glx
