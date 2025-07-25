@@ -1,11 +1,20 @@
 import streamlit as st
-import cv2
 import numpy as np
 import tempfile
 import os
 from PIL import Image
 import random
 import io
+
+# Importa OpenCV con gestione errori
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+    st.success("✅ OpenCV caricato correttamente!")
+except ImportError as e:
+    OPENCV_AVAILABLE = False
+    st.error(f"❌ Errore OpenCV: {e}")
+    st.stop()
 
 # Configurazione della pagina
 st.set_page_config(page_title="GlitchLabLoop507 - Video Edition", layout="centered")
