@@ -4,4 +4,4 @@ libsm6
 libxext6
 libgomp1
 libgtk-3-0
-ffmpeg # Aggiunto ffmpeg
+ffmpeg
