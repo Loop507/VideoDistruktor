@@ -1,7 +1,10 @@
 streamlit
 opencv-python-headless==4.8.1.78
-numpy==1.26.4
+numpy~=1.24.0 # Modificato per compatibilità più ampia, ad esempio 1.24.x
 pillow
 setuptools
 wheel
 moviepy
+imageio
+imageio-ffmpeg
+decorator
