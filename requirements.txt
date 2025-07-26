@@ -5,3 +5,4 @@ opencv-python-headless
 scipy
 librosa
 soundfile
+ffmpeg-python
