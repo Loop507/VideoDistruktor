@@ -1,8 +1,7 @@
-streamlit
-numpy
-Pillow
-opencv-python-headless
-scipy
-librosa
-soundfile
-ffmpeg-python
+libgl1-mesa-glx
+libglib2.0-0
+libsm6
+libxext6
+libgomp1
+libgtk-3-0
+ffmpeg
