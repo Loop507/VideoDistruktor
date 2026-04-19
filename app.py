@@ -11,6 +11,7 @@ from scipy.io import wavfile
 from scipy import signal
 import librosa
 import soundfile as sf
+import time
 
 # Configurazione della pagina
 st.set_page_config(page_title="VideoDistruktor by loop507", layout="centered")
@@ -673,6 +674,111 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
             out.release()
         return None
 
+
+def recompress_h264(input_path):
+    """Ricomprime il video in H.264 con ffmpeg per ridurre le dimensioni."""
+    output_path = tempfile.mktemp(suffix='_h264.mp4')
+    try:
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+            '-c:a', 'aac', '-b:a', '128k',
+            output_path, '-y'
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return output_path
+        else:
+            return input_path  # fallback all'originale
+    except Exception:
+        return input_path
+
+def get_file_size_mb(path):
+    """Ritorna la dimensione del file in MB."""
+    try:
+        return round(os.path.getsize(path) / (1024 * 1024), 2)
+    except:
+        return 0
+
+def get_video_info(path):
+    """Ritorna fps, risoluzione e frame totali del video."""
+    try:
+        cap = cv2.VideoCapture(path)
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = round(frames / fps, 1) if fps > 0 else 0
+        cap.release()
+        return fps, w, h, frames, duration
+    except:
+        return 0, 0, 0, 0, 0
+
+def build_report(original_name, original_size_mb, output_size_mb,
+                 fps, width, height, total_frames, duration,
+                 effect_type, params, include_audio):
+    """Genera il report testuale."""
+
+    effect_names = {
+        'vhs':        'VHS Glitch',
+        'distruttivo':'Distruttivo',
+        'noise':      'Noise',
+        'combined':   'Combinato',
+        'broken_tv':  'Broken TV',
+        'random':     'Random'
+    }
+
+    hashtag_map = {
+        'vhs':        '#vhsglitch #tapeglitch #analogcorruption',
+        'distruttivo':'#destructive #blockglitch #datachaos',
+        'noise':      '#noiseglitch #bitcrush #digitalartifacts',
+        'combined':   '#combinedglitch #multifx #fullcorruption',
+        'broken_tv':  '#brokentv #staticnoise #frequencydrift',
+        'random':     '#randomglitch #chaosfx #unknownsignal'
+    }
+
+    # Parametri leggibili
+    if effect_type == 'vhs' and isinstance(params, tuple):
+        param_str = f"Intensita' {params[0]} | Scanline {params[1]} | Color Shift {params[2]}"
+    elif effect_type == 'distruttivo' and isinstance(params, tuple):
+        param_str = f"Block Size {params[0]} | Num Blocks {params[1]} | Displacement {params[2]}"
+    elif effect_type == 'noise' and isinstance(params, tuple):
+        param_str = f"Intensita' {params[0]} | Coverage {params[1]} | Chaos {params[2]}"
+    elif effect_type == 'broken_tv' and isinstance(params, tuple):
+        param_str = f"Shift {params[0]} | Line Height {params[1]} | Flicker {params[2]}"
+    elif effect_type == 'combined' and isinstance(params, dict):
+        active = [k.replace('apply_','').upper() for k,v in params.items() if k.startswith('apply_') and v]
+        param_str = "Effetti attivi: " + ", ".join(active)
+    elif effect_type == 'random' and isinstance(params, tuple):
+        param_str = f"Livello casualita' {params[0]}"
+    else:
+        param_str = "—"
+
+    effect_hashtags = hashtag_map.get(effect_type, '')
+
+    report = f"""[STUDIO_GLITCH_VIDEO] // VOL_01 // H.264 // DATA_CORRUPTION
+:: MOTORE: videodistruktor [v1.1]
+:: EFFETTO: {effect_names.get(effect_type, effect_type)}
+:: PROCESSO: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
+
+"Il glitch non e' accaduto. E' stato scelto."
+
+> TECHNICAL LOG SHEET:
+* File: {original_name}
+* Durata: {duration} sec | Frame: {total_frames} @ {fps}fps
+* Risoluzione: {width}x{height}
+* Originale: {original_size_mb} MB → Output: {output_size_mb} MB
+* Effetto Audio: {'ON' if include_audio else 'OFF'}
+* Parametri: {param_str}
+
+> Regia e Algoritmo: Loop507
+
+#loop507 #glitchart #videodistruktor #datacorruption #experimentalvideo
+{effect_hashtags} #brutalistart #framecorruption #signalcorruption"""
+
+    return report
+
+
 # Interfaccia Streamlit principale
 if uploaded_file is not None:
     # Controlla ffmpeg per l'audio
@@ -898,36 +1004,72 @@ if uploaded_file is not None:
                 result_path = process_video(video_path, effect_type, params, max_frames, include_audio)
                 
                 if result_path:
-                    # Mostra il video risultante
                     st.success("✅ Video processato con successo!")
-                    
-                    with open(result_path, 'rb') as video_file:
-                        video_bytes = video_file.read()
-                        st.video(video_bytes)
-                        
-                        # Download button
-                        effect_name = {
-                            "vhs": "VHS",
-                            "distruttivo": "Distruttivo", 
-                            "noise": "Noise",
-                            "combined": "Combinato",
-                            "broken_tv": "BrokenTV",
-                            "random": "Random"
-                        }[effect_type]
-                        
-                        filename = f"glitched_{effect_name}_{uploaded_file.name}"
+
+                    # Ricomprimi in H.264
+                    with st.spinner("🗜️ Ottimizzazione H.264..."):
+                        h264_path = recompress_h264(result_path)
+                        time.sleep(0.5)
+
+                    # Info dimensioni
+                    orig_size  = get_file_size_mb(video_path)
+                    out_size   = get_file_size_mb(h264_path)
+                    fps_v, w_v, h_v, frames_v, dur_v = get_video_info(video_path)
+
+                    # Preview ridotta a 480p
+                    with st.spinner("Generando preview..."):
+                        prev_path = tempfile.mktemp(suffix="_preview.mp4")
+                        subprocess.run([
+                            'ffmpeg', '-i', h264_path,
+                            '-vf', 'scale=-2:480',
+                            '-c:v', 'libx264', '-crf', '28', '-preset', 'fast',
+                            '-c:a', 'aac', '-b:a', '96k',
+                            prev_path, '-y'
+                        ], capture_output=True)
+                        time.sleep(0.5)
+
+                    # Mostra preview
+                    st.caption("Preview (480p) — scarica per la versione completa")
+                    if os.path.exists(prev_path):
+                        with open(prev_path, 'rb') as pf:
+                            st.video(pf.read())
+
+                    # Report
+                    report_text = build_report(
+                        uploaded_file.name, orig_size, out_size,
+                        fps_v, w_v, h_v, frames_v, dur_v,
+                        effect_type, params, include_audio
+                    )
+
+                    # Download buttons
+                    effect_name = {
+                        "vhs": "VHS", "distruttivo": "Distruttivo",
+                        "noise": "Noise", "combined": "Combinato",
+                        "broken_tv": "BrokenTV", "random": "Random"
+                    }[effect_type]
+
+                    c_d1, c_d2 = st.columns(2)
+                    with c_d1:
+                        with open(h264_path, 'rb') as vf:
+                            st.download_button(
+                                label="📥 Scarica video (H.264)",
+                                data=vf,
+                                file_name=f"glitched_{effect_name}_{uploaded_file.name}",
+                                mime="video/mp4"
+                            )
+                    with c_d2:
                         st.download_button(
-                            label="📥 Scarica video glitchato",
-                            data=video_bytes,
-                            file_name=filename,
-                            mime="video/mp4"
+                            label="📄 Scarica Report",
+                            data=report_text,
+                            file_name="report_glitch.txt"
                         )
-                    
+
+                    st.text_area("📄 REPORT", report_text, height=320)
+
                     # Pulizia
-                    try:
-                        os.unlink(result_path)
-                    except:
-                        pass
+                    for p in [result_path, h264_path, prev_path]:
+                        try: os.unlink(p)
+                        except: pass
                 else:
                     st.error("❌ Errore durante il processing del video.")
     
