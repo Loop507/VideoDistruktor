@@ -780,6 +780,13 @@ def build_report(original_name, original_size_mb, output_size_mb,
 
 
 # Interfaccia Streamlit principale
+if 'report_data' not in st.session_state: st.session_state.report_data = ""
+if 'video_ready' not in st.session_state: st.session_state.video_ready = False
+if 'h264_path'   not in st.session_state: st.session_state.h264_path   = ""
+if 'prev_path'   not in st.session_state: st.session_state.prev_path    = ""
+if 'effect_name_saved' not in st.session_state: st.session_state.effect_name_saved = ""
+if 'orig_filename' not in st.session_state: st.session_state.orig_filename = ""
+
 if uploaded_file is not None:
     # Controlla ffmpeg per l'audio
     ffmpeg_available = check_ffmpeg()
@@ -1035,44 +1042,56 @@ if uploaded_file is not None:
                             st.video(pf.read())
 
                     # Report
-                    report_text = build_report(
+                    st.session_state.report_data = build_report(
                         uploaded_file.name, orig_size, out_size,
                         fps_v, w_v, h_v, frames_v, dur_v,
                         effect_type, params, include_audio
                     )
-
-                    # Download buttons
-                    effect_name = {
+                    st.session_state.h264_path = h264_path
+                    st.session_state.prev_path = prev_path
+                    st.session_state.effect_name_saved = {
                         "vhs": "VHS", "distruttivo": "Distruttivo",
                         "noise": "Noise", "combined": "Combinato",
                         "broken_tv": "BrokenTV", "random": "Random"
                     }[effect_type]
+                    st.session_state.orig_filename = uploaded_file.name
+                    st.session_state.video_ready = True
 
-                    c_d1, c_d2 = st.columns(2)
-                    with c_d1:
-                        with open(h264_path, 'rb') as vf:
-                            st.download_button(
-                                label="📥 Scarica video (H.264)",
-                                data=vf,
-                                file_name=f"glitched_{effect_name}_{uploaded_file.name}",
-                                mime="video/mp4"
-                            )
-                    with c_d2:
-                        st.download_button(
-                            label="📄 Scarica Report",
-                            data=report_text,
-                            file_name="report_glitch.txt"
-                        )
-
-                    st.text_area("📄 REPORT", report_text, height=320)
-
-                    # Pulizia
-                    for p in [result_path, h264_path, prev_path]:
-                        try: os.unlink(p)
-                        except: pass
+                    # Pulizia solo del file intermedio
+                    try: os.unlink(result_path)
+                    except: pass
                 else:
                     st.error("❌ Errore durante il processing del video.")
-    
+
+        # RISULTATI PERSISTENTI — sopravvivono al re-run
+        if st.session_state.video_ready:
+            st.markdown("---")
+            st.caption("Preview (480p) — scarica per la versione completa")
+            if st.session_state.prev_path and os.path.exists(st.session_state.prev_path):
+                with open(st.session_state.prev_path, 'rb') as pf:
+                    st.video(pf.read())
+
+            c_d1, c_d2 = st.columns(2)
+            with c_d1:
+                if st.session_state.h264_path and os.path.exists(st.session_state.h264_path):
+                    with open(st.session_state.h264_path, 'rb') as vf:
+                        st.download_button(
+                            label="📥 Scarica video (H.264)",
+                            data=vf,
+                            file_name=f"glitched_{st.session_state.effect_name_saved}_{st.session_state.orig_filename}",
+                            mime="video/mp4",
+                            key="down_v"
+                        )
+            with c_d2:
+                st.download_button(
+                    label="📄 Scarica Report",
+                    data=st.session_state.report_data,
+                    file_name="report_glitch.txt",
+                    key="down_r"
+                )
+
+            st.text_area("📄 REPORT", st.session_state.report_data, height=320)
+
     # Pulizia file temporaneo
     try:
         os.unlink(video_path)
