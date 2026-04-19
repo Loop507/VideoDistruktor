@@ -1035,12 +1035,6 @@ if uploaded_file is not None:
                         ], capture_output=True)
                         time.sleep(0.5)
 
-                    # Mostra preview
-                    st.caption("Preview (480p) — scarica per la versione completa")
-                    if os.path.exists(prev_path):
-                        with open(prev_path, 'rb') as pf:
-                            st.video(pf.read())
-
                     # Report
                     st.session_state.report_data = build_report(
                         uploaded_file.name, orig_size, out_size,
@@ -1063,35 +1057,6 @@ if uploaded_file is not None:
                 else:
                     st.error("❌ Errore durante il processing del video.")
 
-        # RISULTATI PERSISTENTI — sopravvivono al re-run
-        if st.session_state.video_ready:
-            st.markdown("---")
-            st.caption("Preview (480p) — scarica per la versione completa")
-            if st.session_state.prev_path and os.path.exists(st.session_state.prev_path):
-                with open(st.session_state.prev_path, 'rb') as pf:
-                    st.video(pf.read())
-
-            c_d1, c_d2 = st.columns(2)
-            with c_d1:
-                if st.session_state.h264_path and os.path.exists(st.session_state.h264_path):
-                    with open(st.session_state.h264_path, 'rb') as vf:
-                        st.download_button(
-                            label="📥 Scarica video (H.264)",
-                            data=vf,
-                            file_name=f"glitched_{st.session_state.effect_name_saved}_{st.session_state.orig_filename}",
-                            mime="video/mp4",
-                            key="down_v"
-                        )
-            with c_d2:
-                st.download_button(
-                    label="📄 Scarica Report",
-                    data=st.session_state.report_data,
-                    file_name="report_glitch.txt",
-                    key="down_r"
-                )
-
-            st.text_area("📄 REPORT", st.session_state.report_data, height=320)
-
     # Pulizia file temporaneo
     try:
         os.unlink(video_path)
@@ -1100,6 +1065,35 @@ if uploaded_file is not None:
 
 else:
     st.info("👆 Carica un video per iniziare!")
+
+# RISULTATI PERSISTENTI — fuori dall'if uploaded_file, sopravvivono al re-run
+if st.session_state.video_ready:
+    st.markdown("---")
+    st.caption("Preview (480p) — scarica per la versione completa")
+    if st.session_state.prev_path and os.path.exists(st.session_state.prev_path):
+        with open(st.session_state.prev_path, 'rb') as pf:
+            st.video(pf.read())
+
+    c_d1, c_d2 = st.columns(2)
+    with c_d1:
+        if st.session_state.h264_path and os.path.exists(st.session_state.h264_path):
+            with open(st.session_state.h264_path, 'rb') as vf:
+                st.download_button(
+                    label="📥 Scarica video (H.264)",
+                    data=vf,
+                    file_name=f"glitched_{st.session_state.effect_name_saved}_{st.session_state.orig_filename}",
+                    mime="video/mp4",
+                    key="down_v"
+                )
+    with c_d2:
+        st.download_button(
+            label="📄 Scarica Report",
+            data=st.session_state.report_data,
+            file_name="report_glitch.txt",
+            key="down_r"
+        )
+
+    st.text_area("📄 REPORT", st.session_state.report_data, height=320)
 
 # Footer
 st.markdown("---")
