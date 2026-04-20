@@ -498,7 +498,26 @@ def glitch_broken_tv_frame(frame, shift_intensity=1.0, line_height=1.0, flicker_
     except Exception as e:
         return frame
 
-def process_video(video_path, effect_type, params, max_frames=None, include_audio=True):
+
+def interpolate_keyframes(keyframes_df, fps, total_frames):
+    """Interpola i keyframe su tutti i frame del video. Ritorna array di valori."""
+    import numpy as np
+    if keyframes_df is None or len(keyframes_df) == 0:
+        return None
+    try:
+        times = keyframes_df["Secondo"].astype(float).tolist()
+        values = keyframes_df["Intensita'"].astype(float).tolist()
+        if len(times) < 2:
+            return None
+        # Converti secondi in frame index
+        frame_times = [t * fps for t in times]
+        all_frames = list(range(total_frames))
+        interpolated = np.interp(all_frames, frame_times, values)
+        return interpolated
+    except Exception:
+        return None
+
+def process_video(video_path, effect_type, params, max_frames=None, include_audio=True, kf_envelope=None):
     """Processa il video con l'effetto scelto, includendo l'audio glitch se richiesto."""
     
     cap = cv2.VideoCapture(video_path)
@@ -539,14 +558,20 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
 
             processed_frame = frame
             try:
+                # Applica keyframe envelope al parametro principale se attivo
+                current_params = params
+                if kf_envelope is not None and isinstance(params, tuple) and frame_count < len(kf_envelope):
+                    kf_val = float(np.clip(kf_envelope[frame_count], 0.1, 3.0))
+                    current_params = (kf_val,) + params[1:]
+
                 if effect_type == 'vhs':
-                    processed_frame = glitch_vhs_frame(frame, *params)
+                    processed_frame = glitch_vhs_frame(frame, *current_params)
                 elif effect_type == 'distruttivo':
-                    processed_frame = glitch_distruttivo_frame(frame, *params)
+                    processed_frame = glitch_distruttivo_frame(frame, *current_params)
                 elif effect_type == 'noise':
-                    processed_frame = glitch_noise_frame(frame, *params)
+                    processed_frame = glitch_noise_frame(frame, *current_params)
                 elif effect_type == 'broken_tv':
-                    processed_frame = glitch_broken_tv_frame(frame, *params)
+                    processed_frame = glitch_broken_tv_frame(frame, *current_params)
                 elif effect_type == 'combined':
                     # Applica effetti combinati sui frame
                     current_frame = frame
@@ -716,7 +741,7 @@ def get_video_info(path):
 
 def build_report(original_name, original_size_mb, output_size_mb,
                  fps, width, height, total_frames, duration,
-                 effect_type, params, include_audio):
+                 effect_type, params, include_audio, kf_df=None):
     """Genera il report testuale."""
 
     effect_names = {
@@ -770,6 +795,8 @@ def build_report(original_name, original_size_mb, output_size_mb,
 * Originale: {original_size_mb} MB → Output: {output_size_mb} MB
 * Effetto Audio: {'ON' if include_audio else 'OFF'}
 * Parametri: {param_str}
+
+{'* Keyframe Intensita\':' + chr(10) + chr(10).join([f'  {row["Secondo"]}s -> {row["Intensita\'"]}'  for _, row in kf_df.iterrows()]) if kf_df is not None and len(kf_df) >= 2 else ''}
 
 > Regia e Algoritmo: Loop507
 
@@ -1001,14 +1028,57 @@ if uploaded_file is not None:
 
     # Limita frame per video lunghi
     max_frames = st.number_input("🎬 Limite frame (0 = nessun limite)", min_value=0, max_value=10000, value=0)
-    
+
+    # KEYFRAME — solo per effetti singoli
+    kf_df = None
+    use_keyframes = False
+    if effect_type in ['vhs', 'distruttivo', 'noise', 'broken_tv']:
+        st.markdown("---")
+        use_keyframes = st.toggle("⏱️ Animazione keyframe (Intensita')",
+            help="Definisci come cambia l'intensita' dell'effetto nel tempo. Aggiungi righe per ogni punto chiave.")
+        if use_keyframes:
+            # Calcola durata stimata per precompilare i keyframe
+            cap_tmp = cv2.VideoCapture(video_path)
+            fps_tmp = cap_tmp.get(cv2.CAP_PROP_FPS) or 24
+            frames_tmp = cap_tmp.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            cap_tmp.release()
+            dur_est = round(frames_tmp / fps_tmp, 1) if fps_tmp > 0 else 10.0
+            mid_est = round(dur_est / 2, 1)
+
+            import pandas as pd
+            default_kf = pd.DataFrame({
+                "Secondo": [0.0, mid_est, dur_est],
+                "Intensita'": [0.5, 1.5, 0.5]
+            })
+            st.caption(f"Durata stimata: {dur_est}s — modifica i valori o aggiungi righe")
+            kf_df = st.data_editor(
+                default_kf,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "Secondo":    st.column_config.NumberColumn("Secondo (s)", min_value=0.0, step=0.1, format="%.1f"),
+                    "Intensita'": st.column_config.NumberColumn("Intensita'",  min_value=0.1, max_value=3.0, step=0.1, format="%.1f"),
+                }
+            )
+
     # Bottone per processare
     if st.button("🚀 Processa Video"):
         if not any([effect_type != 'combined' or any(params.values()) if isinstance(params, dict) else True]):
             st.warning("⚠️ Seleziona almeno un effetto per la modalità combinata!")
         else:
             with st.spinner("🔥 Processando il video..."):
-                result_path = process_video(video_path, effect_type, params, max_frames, include_audio)
+                # Calcola envelope keyframe se attivo
+                kf_envelope = None
+                if use_keyframes and kf_df is not None and len(kf_df) >= 2:
+                    cap_info = cv2.VideoCapture(video_path)
+                    fps_info = int(cap_info.get(cv2.CAP_PROP_FPS)) or 24
+                    frames_info = int(cap_info.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap_info.release()
+                    if max_frames > 0:
+                        frames_info = min(frames_info, max_frames)
+                    kf_envelope = interpolate_keyframes(kf_df, fps_info, frames_info)
+
+                result_path = process_video(video_path, effect_type, params, max_frames, include_audio, kf_envelope)
                 
                 if result_path:
                     st.success("✅ Video processato con successo!")
@@ -1039,7 +1109,7 @@ if uploaded_file is not None:
                     st.session_state.report_data = build_report(
                         uploaded_file.name, orig_size, out_size,
                         fps_v, w_v, h_v, frames_v, dur_v,
-                        effect_type, params, include_audio
+                        effect_type, params, include_audio, kf_df
                     )
                     st.session_state.h264_path = h264_path
                     st.session_state.prev_path = prev_path
