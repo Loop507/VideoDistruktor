@@ -561,7 +561,7 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
                 # Applica keyframe envelope al parametro principale se attivo
                 current_params = params
                 if kf_envelope is not None and isinstance(params, tuple) and frame_count < len(kf_envelope):
-                    kf_val = float(np.clip(kf_envelope[frame_count], 0.1, 3.0))
+                    kf_val = float(np.clip(kf_envelope[frame_count], 0.0, 3.0))
                     current_params = (kf_val,) + params[1:]
 
                 if effect_type == 'vhs':
@@ -1057,7 +1057,7 @@ if uploaded_file is not None:
                 use_container_width=True,
                 column_config={
                     "Secondo":    st.column_config.NumberColumn("Secondo (s)", min_value=0.0, step=0.1, format="%.1f"),
-                    "Intensita'": st.column_config.NumberColumn("Intensita'",  min_value=0.1, max_value=3.0, step=0.1, format="%.1f"),
+                    "Intensita'": st.column_config.NumberColumn("Intensita'",  min_value=0.0, max_value=3.0, step=0.1, format="%.1f"),
                 }
             )
 
