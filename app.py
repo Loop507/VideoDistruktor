@@ -797,7 +797,6 @@ if 'report_data' not in st.session_state: st.session_state.report_data = ""
 if 'video_ready' not in st.session_state: st.session_state.video_ready = False
 if 'h264_path'   not in st.session_state: st.session_state.h264_path   = ""
 if 'prev_path'   not in st.session_state: st.session_state.prev_path    = ""
-if 'thumb_path'  not in st.session_state: st.session_state.thumb_path   = ""
 if 'effect_name_saved' not in st.session_state: st.session_state.effect_name_saved = ""
 if 'orig_filename' not in st.session_state: st.session_state.orig_filename = ""
 if 'glitched_audio_path' not in st.session_state: st.session_state.glitched_audio_path = ""
@@ -1132,17 +1131,15 @@ if uploaded_file is not None:
                         h264_path = recompress_h264(result_path)
                         time.sleep(0.5)
 
-                    # Info dimensioni
+                    # Info dimensioni (prima di cancellare video_path)
                     orig_size  = get_file_size_mb(video_path)
-                    out_size   = get_file_size_mb(h264_path)
                     fps_v, w_v, h_v, frames_v, dur_v = get_video_info(video_path)
+                    out_size   = get_file_size_mb(h264_path)
 
-                    # Preview ridotta: prima un frame glitchato (thumbnail immediato), poi video 5-10s
+                    # Preview video 10s a 360p
                     with st.spinner("Generando preview..."):
-                        # 1. Thumbnail: primo frame glitchato
                         fd_prev, prev_path = tempfile.mkstemp(suffix="_preview.mp4")
                         os.close(fd_prev)
-                        # Estrai max 10s di preview dal video glitchato
                         subprocess.run([
                             'ffmpeg', '-i', h264_path,
                             '-t', '10',
@@ -1152,18 +1149,6 @@ if uploaded_file is not None:
                             prev_path, '-y'
                         ], capture_output=True)
 
-                        # 2. Thumbnail JPEG dal primo frame del preview
-                        fd_thumb, thumb_path = tempfile.mkstemp(suffix="_thumb.jpg")
-                        os.close(fd_thumb)
-                        subprocess.run([
-                            'ffmpeg', '-i', h264_path,
-                            '-vframes', '1', '-q:v', '3',
-                            '-vf', 'scale=-2:360',
-                            thumb_path, '-y'
-                        ], capture_output=True)
-
-                        time.sleep(0.3)
-
                     # Report
                     st.session_state.report_data = build_report(
                         uploaded_file.name, orig_size, out_size,
@@ -1172,7 +1157,6 @@ if uploaded_file is not None:
                     )
                     st.session_state.h264_path = h264_path
                     st.session_state.prev_path = prev_path
-                    st.session_state.thumb_path = thumb_path
                     st.session_state.effect_name_saved = {
                         "vhs": "VHS", "distruttivo": "Distruttivo",
                         "noise": "Noise", "combined": "Combinato",
@@ -1181,12 +1165,10 @@ if uploaded_file is not None:
                     st.session_state.orig_filename = uploaded_file.name
                     st.session_state.video_ready = True
 
-                    # Pulizia solo del file intermedio
-                    try: os.unlink(result_path)
-                    except: pass
-                    # Pulizia video temp originale solo dopo processing completato
-                    try: os.unlink(video_path)
-                    except: pass
+                    # Pulizia file intermedi DOPO aver usato video_path
+                    for p in [result_path, video_path]:
+                        try: os.unlink(p)
+                        except: pass
                 else:
                     st.error("❌ Errore durante il processing del video.")
 
@@ -1249,14 +1231,7 @@ if uploaded_audio_file is not None and check_ffmpeg():
 # RISULTATI PERSISTENTI — fuori dall'if uploaded_file, sopravvivono al re-run
 if st.session_state.video_ready:
     st.markdown("---")
-    
-    # Thumbnail immediato + preview video 10s
-    col_prev, col_info = st.columns([2, 1])
-    with col_prev:
-        if st.session_state.thumb_path and os.path.exists(st.session_state.thumb_path):
-            st.image(st.session_state.thumb_path, caption="🖼️ Anteprima frame", use_column_width=True)
-    
-    st.caption("▶️ Preview video (10s, 360p) — scarica per la versione completa")
+    st.caption("▶️ Preview (10s, 360p) — scarica per la versione completa")
     if st.session_state.prev_path and os.path.exists(st.session_state.prev_path):
         with open(st.session_state.prev_path, 'rb') as pf:
             st.video(pf.read())
