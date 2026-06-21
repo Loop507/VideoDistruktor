@@ -513,7 +513,7 @@ def interpolate_keyframes(keyframes_df, fps, total_frames):
     except Exception:
         return None
 
-def process_video(video_path, effect_type, params, max_frames=None, include_audio=True, kf_envelope=None):
+def process_video(video_path, effect_type, params, max_frames=None, include_audio=True, kf_envelope=None, audio_params_override=None):
     """Processa il video con l'effetto scelto, includendo l'audio glitch se richiesto."""
     
     cap = cv2.VideoCapture(video_path)
@@ -646,22 +646,9 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
             audio_path = extract_audio(video_path)
             
             if audio_path:
-                # Processa l'audio con l'effetto corrispondente
-                audio_params = []
+                # Usa audio_params_override se disponibile, altrimenti fallback su params video
+                audio_params = audio_params_override if audio_params_override is not None else params
                 audio_effect_type = effect_type
-                
-                if effect_type == 'vhs':
-                    audio_params = params  # intensity, scanline_freq -> wow_flutter, color_shift -> tape_hiss
-                elif effect_type == 'distruttivo':
-                    audio_params = params  # block_size -> chaos_level, num_blocks -> skip_prob, displacement -> reverse_prob
-                elif effect_type == 'noise':
-                    audio_params = params  # noise_intensity, coverage -> digital_artifacts, chaos -> bit_crush
-                elif effect_type == 'broken_tv':
-                    audio_params = params  # shift_intensity -> static_intensity, line_height -> channel_separation, flicker_prob -> frequency_drift
-                elif effect_type == 'combined':
-                    audio_params = params  # Passa tutti i parametri
-                elif effect_type == 'random':
-                    audio_params = params  # Passa il livello random
                 
                 processed_audio_path = process_audio_glitch(audio_path, audio_effect_type, audio_params)
                 
@@ -859,6 +846,7 @@ if uploaded_file is not None:
             color_shift = st.slider("Color shift", 0.1, 3.0, 1.0, 0.1)
         
         params = (vhs_intensity, scanline_freq, color_shift)
+        audio_params_override = None
         
         if include_audio:
             st.subheader("🎵 Parametri Audio VHS")
@@ -867,6 +855,7 @@ if uploaded_file is not None:
                 wow_flutter = st.slider("Wow & Flutter", 0.1, 3.0, 1.0, 0.1)
             with col2:
                 tape_hiss = st.slider("Tape Hiss", 0.1, 3.0, 1.0, 0.1)
+            audio_params_override = (vhs_intensity, wow_flutter, tape_hiss)
 
     elif effect_type == 'distruttivo':
         st.subheader("💥 Parametri Distruttivo")
@@ -879,6 +868,7 @@ if uploaded_file is not None:
             displacement = st.slider("Spostamento", 0.1, 3.0, 1.0, 0.1)
         
         params = (block_size, num_blocks, displacement)
+        audio_params_override = None
         
         if include_audio:
             st.subheader("🎵 Parametri Audio Distruttivo")
@@ -889,6 +879,7 @@ if uploaded_file is not None:
                 skip_prob = st.slider("Probabilità skip", 0.1, 3.0, 1.0, 0.1)
             with col3:
                 reverse_prob = st.slider("Probabilità reverse", 0.1, 3.0, 1.0, 0.1)
+            audio_params_override = (chaos_level, skip_prob, reverse_prob)
 
     elif effect_type == 'noise':
         st.subheader("📺 Parametri Noise")
@@ -901,6 +892,7 @@ if uploaded_file is not None:
             chaos = st.slider("Chaos", 0.1, 3.0, 1.0, 0.1)
         
         params = (noise_intensity, coverage, chaos)
+        audio_params_override = None
         
         if include_audio:
             st.subheader("🎵 Parametri Audio Noise")
@@ -909,6 +901,7 @@ if uploaded_file is not None:
                 digital_artifacts = st.slider("Artefatti digitali", 0.1, 3.0, 1.0, 0.1)
             with col2:
                 bit_crush = st.slider("Bit Crushing", 0.1, 3.0, 1.0, 0.1)
+            audio_params_override = (noise_intensity, digital_artifacts, bit_crush)
 
     elif effect_type == 'broken_tv':
         st.subheader("📻 Parametri Broken TV")
@@ -921,6 +914,7 @@ if uploaded_file is not None:
             flicker_prob = st.slider("Probabilità flicker", 0.1, 3.0, 1.0, 0.1)
         
         params = (shift_intensity, line_height, flicker_prob)
+        audio_params_override = None
         
         if include_audio:
             st.subheader("🎵 Parametri Audio Broken TV")
@@ -931,6 +925,7 @@ if uploaded_file is not None:
                 channel_separation = st.slider("Separazione canali", 0.1, 3.0, 1.0, 0.1)
             with col3:
                 frequency_drift = st.slider("Drift frequenza", 0.1, 3.0, 1.0, 0.1)
+            audio_params_override = (static_intensity, channel_separation, frequency_drift)
 
     elif effect_type == 'combined':
         st.subheader("🌟 Parametri Combinato")
@@ -1026,6 +1021,11 @@ if uploaded_file is not None:
         st.subheader("🎲 Parametri Random")
         random_level = st.slider("Livello di casualità", 0.1, 3.0, 1.0, 0.1)
         params = (random_level,)
+        audio_params_override = None  # random sceglie da solo
+
+    # audio_params_override per combined: usa params dict direttamente (già contiene chiavi audio)
+    if effect_type == 'combined':
+        audio_params_override = None  # combined usa params dict che già include i valori audio
 
     # Limita frame per video lunghi
     max_frames = st.number_input("🎬 Limite frame (0 = nessun limite)", min_value=0, max_value=10000, value=0)
@@ -1062,6 +1062,49 @@ if uploaded_file is not None:
                 }
             )
 
+    # --- ANTEPRIMA ISTANTANEA (1 frame) ---
+    if st.button("👁️ Anteprima effetto (1 frame)"):
+        cap_prev = cv2.VideoCapture(video_path)
+        # Salta al frame centrale per una preview più rappresentativa
+        total_f = int(cap_prev.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_prev.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_f // 3))
+        ret_p, frame_p = cap_prev.read()
+        cap_prev.release()
+        if ret_p:
+            try:
+                if effect_type == 'vhs':
+                    prev_frame = glitch_vhs_frame(frame_p, *params)
+                elif effect_type == 'distruttivo':
+                    prev_frame = glitch_distruttivo_frame(frame_p, *params)
+                elif effect_type == 'noise':
+                    prev_frame = glitch_noise_frame(frame_p, *params)
+                elif effect_type == 'broken_tv':
+                    prev_frame = glitch_broken_tv_frame(frame_p, *params)
+                elif effect_type == 'combined':
+                    prev_frame = frame_p.copy()
+                    if params.get("apply_vhs"):
+                        prev_frame = glitch_vhs_frame(prev_frame, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
+                    if params.get("apply_distruttivo"):
+                        prev_frame = glitch_distruttivo_frame(prev_frame, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+                    if params.get("apply_noise"):
+                        prev_frame = glitch_noise_frame(prev_frame, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
+                    if params.get("apply_broken_tv"):
+                        prev_frame = glitch_broken_tv_frame(prev_frame, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
+                elif effect_type == 'random':
+                    random_level = params[0] if params else 1.0
+                    chosen = random.choice(['vhs','distruttivo','noise','broken_tv'])
+                    rp = tuple(random.uniform(0.5, 1.5) * random_level for _ in range(3))
+                    prev_frame = {'vhs': glitch_vhs_frame, 'distruttivo': glitch_distruttivo_frame, 'noise': glitch_noise_frame, 'broken_tv': glitch_broken_tv_frame}[chosen](frame_p, *rp)
+                else:
+                    prev_frame = frame_p
+                # Converti BGR→RGB e mostra
+                prev_rgb = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2RGB)
+                st.image(prev_rgb, caption=f"🖼️ Anteprima effetto: {effect_type}", use_column_width=True)
+            except Exception as e:
+                st.warning(f"Errore anteprima: {e}")
+        else:
+            st.warning("Impossibile leggere il frame dal video.")
+
     # Bottone per processare
     if st.button("🚀 Processa Video"):
         if not any([effect_type != 'combined' or any(params.values()) if isinstance(params, dict) else True]):
@@ -1079,7 +1122,7 @@ if uploaded_file is not None:
                         frames_info = min(frames_info, max_frames)
                     kf_envelope = interpolate_keyframes(kf_df, fps_info, frames_info)
 
-                result_path = process_video(video_path, effect_type, params, max_frames, include_audio, kf_envelope)
+                result_path = process_video(video_path, effect_type, params, max_frames, include_audio, kf_envelope, audio_params_override)
                 
                 if result_path:
                     st.success("✅ Video processato con successo!")
