@@ -363,135 +363,256 @@ def combine_video_audio(video_path, audio_path, output_path):
         st.error(f"Errore nella combinazione video/audio: {e}")
         return False
 
-# --- Funzioni degli effetti video (mantenute dal codice originale) ---
-def glitch_vhs_frame(frame, intensity=1.0, scanline_freq=1.0, color_shift=1.0):
+# --- Funzioni degli effetti video — DISTRUTTIVI VERI ---
+
+def glitch_pixel_sort(frame, intensity=1.0, threshold=0.5, direction=0.5):
+    """Pixel sorting per luminosità su righe o colonne."""
     try:
         arr = frame.copy()
-        h, w, _ = arr.shape
-        base_shift = int(5 + (15 * intensity))
-        for y in range(0, h, int(max(1, 2 * (2 - scanline_freq)))):
-            shift = int(base_shift * np.sin(y * 0.1 * scanline_freq))
-            if shift != 0:
-                arr[y:y+1, :, :] = np.roll(arr[y:y+1, :, :], shift, axis=1)
-            if random.random() < (0.05 + 0.05 * intensity):
-                noise_amount = int(5 + (10 * intensity))
-                arr[y:y+1, :, :] = np.clip(arr[y:y+1, :, :] + np.random.randint(-noise_amount, noise_amount, (1, w, 3)), 0, 255)
-        b, g, r = cv2.split(arr)
-        shift_val = int(5 * color_shift)
-        r = np.roll(r, random.randint(-shift_val, shift_val), axis=1)
-        b = np.roll(b, random.randint(-shift_val, shift_val), axis=1)
-        return cv2.merge([b, g, r])
-    except Exception as e:
-        return frame
-
-def glitch_distruttivo_frame(frame, block_size=1.0, num_blocks=1.0, displacement=1.0):
-    try:
-        arr = frame.copy()
-        h, w, _ = arr.shape
-        if w < 20 or h < 20:
-            return frame
-        max_total_blocks = min(10, w * h // 5000)
-        total_blocks = int(max(1, max_total_blocks * num_blocks))
-        for i in range(total_blocks):
-            max_w_block = int(min(w // 8, 20 + 20 * block_size))
-            max_h_block = int(min(h // 8, 20 + 20 * block_size))
-            w_block = random.randint(min(3, max_w_block), max_w_block)
-            h_block = random.randint(min(3, max_h_block), max_h_block)
-
-            x = random.randint(0, max(0, w - w_block -1))
-            y = random.randint(0, max(0, h - h_block -1))
-
-            max_disp = int(min(w//10, h//10, 10 + 10 * displacement))
-            dx = random.randint(-max_disp, max_disp)
-            dy = random.randint(-max_disp, max_disp)
-
-            x_new = np.clip(x + dx, 0, w - w_block)
-            y_new = np.clip(y + dy, 0, h - h_block)
-
-            if h_block > 0 and w_block > 0 and y + h_block <= h and x + w_block <= w:
-                block = arr[y:y+h_block, x:x+w_block].copy()
-                if y_new + h_block <= h and x_new + w_block <= w:
-                    arr[y_new:y_new+h_block, x_new:x_new+w_block] = block
+        h, w = arr.shape[:2]
+        gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        # soglia: pixel sotto threshold vengono sortati
+        thr = np.clip(1.0 - threshold * 0.8, 0.05, 0.95)
+        num_rows = max(1, int(h * min(intensity, 1.0)))
+        row_indices = np.random.choice(h, num_rows, replace=False)
+        for y in row_indices:
+            mask = gray[y] < thr
+            if not np.any(mask):
+                continue
+            # trova segmenti contigui sotto soglia
+            starts = np.where(np.diff(np.concatenate([[0], mask.astype(int), [0]])) == 1)[0]
+            ends   = np.where(np.diff(np.concatenate([[0], mask.astype(int), [0]])) == -1)[0]
+            for s, e in zip(starts, ends):
+                if e - s < 2:
+                    continue
+                seg = arr[y, s:e]
+                lum = gray[y, s:e]
+                order = np.argsort(lum)
+                arr[y, s:e] = seg[order]
+        # anche colonne se direction > 0.5
+        if direction > 0.5:
+            num_cols = max(1, int(w * min((direction - 0.5) * 2 * intensity, 1.0)))
+            col_indices = np.random.choice(w, num_cols, replace=False)
+            for x in col_indices:
+                mask = gray[:, x] < thr
+                if not np.any(mask):
+                    continue
+                starts = np.where(np.diff(np.concatenate([[0], mask.astype(int), [0]])) == 1)[0]
+                ends   = np.where(np.diff(np.concatenate([[0], mask.astype(int), [0]])) == -1)[0]
+                for s, e in zip(starts, ends):
+                    if e - s < 2:
+                        continue
+                    seg = arr[s:e, x]
+                    lum = gray[s:e, x]
+                    order = np.argsort(lum)
+                    arr[s:e, x] = seg[order]
         return arr
-    except Exception as e:
+    except Exception:
         return frame
 
-def glitch_noise_frame(frame, noise_intensity=1.0, coverage=1.0, chaos=1.0):
+def glitch_channel_shift(frame, intensity=1.0, spread=1.0, mode=0.5):
+    """Separazione canali RGB con offset e bleeding — corruzioni vere."""
     try:
         arr = frame.copy().astype(np.int16)
-        h, w, _ = arr.shape
-        base_intensity = int(10 + (40 * noise_intensity))
+        h, w = arr.shape[:2]
+        max_shift = int(w * 0.05 * intensity * spread)
+        if max_shift < 1:
+            return frame
+        b, g, r = cv2.split(arr.astype(np.uint8))
+        # shift orizzontale asimmetrico per canale
+        r = np.roll(r,  random.randint(-max_shift, max_shift), axis=1)
+        b = np.roll(b, -random.randint(1, max(1, max_shift)), axis=1)
+        if mode > 0.5:
+            # shift verticale sul canale G
+            g = np.roll(g, random.randint(-max_shift // 2, max_shift // 2), axis=0)
+        # bleeding: mischia valori tra canali
+        bleed = np.clip(intensity * 0.15, 0, 0.4)
+        r_out = np.clip(r.astype(np.float32) * (1 - bleed) + g.astype(np.float32) * bleed, 0, 255).astype(np.uint8)
+        b_out = np.clip(b.astype(np.float32) * (1 - bleed) + r.astype(np.float32) * bleed, 0, 255).astype(np.uint8)
+        return cv2.merge([b_out, g, r_out])
+    except Exception:
+        return frame
 
-        if random.random() < coverage:
-            if chaos < 0.4:
-                num_bands = int(2 + (5 * coverage))
-                for _ in range(num_bands):
-                    start_y = random.randint(0, h-1)
-                    band_height = int(1 + (10 * noise_intensity))
-                    end_y = min(start_y + band_height, h)
-                    band_noise = np.random.randint(-base_intensity, base_intensity, (end_y - start_y, w, 3))
-                    arr[start_y:end_y] += band_noise
-            elif chaos < 0.8:
-                num_pixels = int(w * h * 0.005 * coverage)
-                for _ in range(num_pixels):
-                    x = random.randint(0, w-1)
-                    y = random.randint(0, h-1)
-                    pixel_noise = np.random.randint(-base_intensity, base_intensity, 3)
-                    arr[y, x] += pixel_noise
+def glitch_datamosh(frame, prev_frame, intensity=1.0, block_size=1.0, chaos=1.0):
+    """Datamosh reale: duplica blocchi P-frame dal frame precedente con motion displacement."""
+    try:
+        if prev_frame is None:
+            return frame
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        bsize = max(8, int(16 * block_size))
+        # numero di blocchi proporzionale all'intensità
+        n_blocks = int((h // bsize) * (w // bsize) * np.clip(intensity * 0.3, 0.05, 0.95))
+        for _ in range(n_blocks):
+            # sorgente dal frame precedente
+            sx = random.randint(0, w - bsize)
+            sy = random.randint(0, h - bsize)
+            # destinazione con displacement
+            max_disp = int(w * 0.1 * chaos)
+            dx = random.randint(-max_disp, max_disp)
+            dy = random.randint(-max_disp // 2, max_disp // 2)
+            tx = np.clip(sx + dx, 0, w - bsize)
+            ty = np.clip(sy + dy, 0, h - bsize)
+            # copia blocco da prev_frame a posizione shiftata in frame corrente
+            arr[ty:ty+bsize, tx:tx+bsize] = prev_frame[sy:sy+bsize, sx:sx+bsize]
+        return arr
+    except Exception:
+        return frame
+
+def glitch_byte_corrupt(frame, intensity=1.0, chunk_size=1.0, randomize=0.5):
+    """Corruzione dati reale: manomette blocchi di byte grezzi come se fossero dati compressi."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        # converti in JPEG e corrompi i byte
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), max(20, int(85 - 50 * intensity))]
+        ret, buf = cv2.imencode('.jpg', arr, encode_param)
+        if not ret:
+            return frame
+        data = bytearray(buf.tobytes())
+        # salta header JPEG (primi 500 byte circa)
+        start = min(500, len(data) // 4)
+        n_corruptions = max(1, int(len(data) * 0.001 * intensity))
+        csize = max(1, int(4 * chunk_size))
+        for _ in range(n_corruptions):
+            pos = random.randint(start, max(start, len(data) - csize - 1))
+            if randomize > 0.5:
+                # sostituzione con byte casuali
+                for i in range(csize):
+                    data[pos + i] = random.randint(0, 255)
             else:
-                general_intensity = int(base_intensity * 0.5)
-                if random.random() < 0.2:
-                    noise_block_h = int(h * (0.1 + 0.2 * coverage))
-                    if noise_block_h > 0:
-                        start_y = random.randint(0, h - noise_block_h)
-                        arr[start_y:start_y+noise_block_h] += np.random.randint(-general_intensity, general_intensity, (noise_block_h, w, 3))
+                # duplica chunk da altra posizione
+                src = random.randint(start, max(start, len(data) - csize - 1))
+                data[pos:pos+csize] = data[src:src+csize]
+        try:
+            corrupted = np.frombuffer(bytes(data), dtype=np.uint8)
+            decoded = cv2.imdecode(corrupted, cv2.IMREAD_COLOR)
+            if decoded is not None and decoded.shape == frame.shape:
+                return decoded
+        except Exception:
+            pass
+        return arr
+    except Exception:
+        return frame
 
-        if chaos > 0.5:
-            channel = random.randint(0, 2)
-            multiplier = random.uniform(0.8, 1.2)
-            arr[:,:,channel] = np.clip(arr[:,:,channel] * multiplier, 0, 255)
+def glitch_slice_shift(frame, intensity=1.0, num_slices=1.0, drift=0.5):
+    """Slice shift: taglia il frame in strisce orizzontali e le sposta in modo asincrono."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        n = max(2, int(5 + 20 * num_slices))
+        slice_h = max(1, h // n)
+        max_shift = int(w * 0.15 * intensity)
+        if max_shift < 1:
+            return frame
+        for i in range(n):
+            y0 = i * slice_h
+            y1 = min(y0 + slice_h, h)
+            # drift: shift progressivo per strisce adiacenti
+            shift = int(max_shift * np.sin(i * drift * np.pi / n + random.uniform(0, np.pi)))
+            if shift != 0:
+                arr[y0:y1] = np.roll(arr[y0:y1], shift, axis=1)
+        return arr
+    except Exception:
+        return frame
 
-        return np.clip(arr, 0, 255).astype(np.uint8)
-    except Exception as e:
+def glitch_vhs_frame(frame, intensity=1.0, scanline_freq=1.0, color_shift=1.0):
+    """VHS: scanline + color shift + chroma noise."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        b, g, r = cv2.split(arr)
+        sv = int(3 + 12 * color_shift)
+        r = np.roll(r,  random.randint(-sv, sv), axis=1)
+        b = np.roll(b, -random.randint(1, max(1, sv)), axis=1)
+        arr = cv2.merge([b, g, r])
+        freq = max(1, int(4 / max(0.1, scanline_freq)))
+        for y in range(0, h, freq):
+            sv2 = int((intensity * 20) * np.sin(y * 0.15 * scanline_freq + random.uniform(0, 0.5)))
+            if sv2 != 0:
+                arr[y:y+1] = np.roll(arr[y:y+1], sv2, axis=1)
+        luma_noise = np.random.randint(-int(8*intensity), int(8*intensity)+1, arr.shape, dtype=np.int16)
+        arr = np.clip(arr.astype(np.int16) + luma_noise, 0, 255).astype(np.uint8)
+        return arr
+    except Exception:
         return frame
 
 def glitch_broken_tv_frame(frame, shift_intensity=1.0, line_height=1.0, flicker_prob=1.0):
+    """Broken TV: slice shift + static."""
     try:
         arr = frame.copy()
-        h, w, _ = arr.shape
-
-        min_line_h = max(1, int(1 + (10 * (1 - line_height))))
-        max_line_h = max(1, int(20 * line_height))
-
+        h, w = arr.shape[:2]
+        min_lh = max(1, int(2 * (1 - min(line_height, 0.99))))
+        max_lh = max(2, int(25 * line_height))
         y = 0
         while y < h:
-            current_line_h = random.randint(min_line_h, max_line_h)
-
+            lh = random.randint(min_lh, max_lh)
+            end = min(y + lh, h)
             if random.random() < shift_intensity:
-                max_shift = int(10 + (25 * shift_intensity))
-                shift_amount = random.randint(-max_shift, max_shift)
-
-                end_y = min(y + current_line_h, h)
-
-                if shift_amount != 0 and (end_y - y) > 0:
-                    arr[y:end_y, :, :] = np.roll(arr[y:end_y, :, :], shift_amount, axis=1)
-
-            if random.random() < (0.05 + 0.15 * flicker_prob):
-                noise_amount = int(5 + (20 * flicker_prob))
-
-                noise_start_y = random.randint(y, min(y + current_line_h - 1, h - 1))
-                noise_end_y = min(noise_start_y + int(current_line_h * random.uniform(0.2, 0.8)), h)
-
-                if noise_end_y > noise_start_y:
-                    arr[noise_start_y:noise_end_y, :, :] = np.clip(
-                        arr[noise_start_y:noise_end_y, :, :] + np.random.randint(-noise_amount, noise_amount, (noise_end_y - noise_start_y, w, 3)),
-                        0, 255
-                    )
-
-            y += current_line_h
-
+                ms = int(10 + 30 * shift_intensity)
+                s = random.randint(-ms, ms)
+                if s != 0:
+                    arr[y:end] = np.roll(arr[y:end], s, axis=1)
+            if random.random() < 0.1 * flicker_prob:
+                noise = np.random.randint(-int(30*flicker_prob), int(30*flicker_prob)+1,
+                                          arr[y:end].shape, dtype=np.int16)
+                arr[y:end] = np.clip(arr[y:end].astype(np.int16) + noise, 0, 255).astype(np.uint8)
+            y += lh
         return arr
-    except Exception as e:
+    except Exception:
+        return frame
+
+def glitch_noise_frame(frame, noise_intensity=1.0, coverage=1.0, chaos=1.0):
+    """Noise: bit crush + canale amplificato + bande."""
+    try:
+        arr = frame.copy().astype(np.int16)
+        h, w = arr.shape[:2]
+        # bit crush
+        bits = max(2, int(8 - 5 * min(chaos, 1.0)))
+        scale = 2 ** (8 - bits)
+        arr = (arr // scale) * scale
+        # bande di noise
+        base = int(15 + 60 * noise_intensity)
+        n_bands = int(1 + 8 * coverage)
+        for _ in range(n_bands):
+            y0 = random.randint(0, h-1)
+            bh = int(1 + 15 * noise_intensity)
+            y1 = min(y0 + bh, h)
+            arr[y0:y1] += np.random.randint(-base, base+1, (y1-y0, w, 3), dtype=np.int16)
+        ch = random.randint(0, 2)
+        arr[:,:,ch] = np.clip(arr[:,:,ch] * random.uniform(0.7, 1.4), 0, 255)
+        return np.clip(arr, 0, 255).astype(np.uint8)
+    except Exception:
+        return frame
+
+def glitch_distruttivo_frame(frame, block_size=1.0, num_blocks=1.0, displacement=1.0):
+    """Distruttivo: block glitch + inversion + channel swap."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        bw = max(4, int(10 + 60 * block_size))
+        bh = max(4, int(6 + 40 * block_size))
+        n = max(1, int(3 + 20 * num_blocks))
+        for _ in range(n):
+            x = random.randint(0, max(0, w - bw - 1))
+            y = random.randint(0, max(0, h - bh - 1))
+            md = int(max(1, w * 0.12 * displacement))
+            dx = random.randint(-md, md)
+            dy = random.randint(-md//2, md//2)
+            nx = np.clip(x + dx, 0, w - bw)
+            ny = np.clip(y + dy, 0, h - bh)
+            block = arr[y:y+bh, x:x+bw].copy()
+            # operazione distruttiva: inverte o swappa canali
+            op = random.random()
+            if op < 0.33:
+                block = 255 - block
+            elif op < 0.66:
+                block = block[:, :, ::-1]  # swap BGR
+            else:
+                block = np.roll(block, random.randint(1, bw-1), axis=1)
+            arr[ny:ny+bh, nx:nx+bw] = block
+        return arr
+    except Exception:
         return frame
 
 
@@ -513,12 +634,12 @@ def interpolate_keyframes(keyframes_df, fps, total_frames):
     except Exception:
         return None
 
-def process_video(video_path, effect_type, params, max_frames=None, include_audio=True, kf_envelope=None, audio_params_override=None):
+def process_video(video_path, effect_type, params, max_frames=None, include_audio=True, kf_envelope=None, audio_params_override=None, aspect_ratio="Originale"):
     """Processa il video con l'effetto scelto, includendo l'audio glitch se richiesto."""
     
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        st.error("❌ Impossibile aprire il video. Potrebbe essere danneggiato o non supportato.")
+        st.error("❌ Impossibile aprire il video.")
         return None
 
     fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -526,28 +647,42 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    if max_frames is None or max_frames == 0:
-        actual_total_frames = total_frames
-    else:
-        actual_total_frames = min(total_frames, max_frames)
+    actual_total_frames = total_frames if (max_frames is None or max_frames == 0) else min(total_frames, max_frames)
 
-    # Video temporaneo senza audio
+    # Calcola dimensioni output in base all'aspect ratio
+    def calc_output_size(w, h, ar):
+        if ar == "16:9":
+            ratio = 16 / 9
+        elif ar == "9:16":
+            ratio = 9 / 16
+        elif ar == "1:1":
+            ratio = 1.0
+        else:
+            return w, h
+        if w / h > ratio:
+            ow = int(h * ratio); ow -= ow % 2; oh = h
+        else:
+            oh = int(w / ratio); oh -= oh % 2; ow = w
+        return ow, oh
+
+    out_w, out_h = calc_output_size(width, height, aspect_ratio)
+
     fd1, temp_video_path = tempfile.mkstemp(suffix='_no_audio.mp4')
     os.close(fd1)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
     try:
-        out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
+        out = cv2.VideoWriter(temp_video_path, fourcc, fps, (out_w, out_h))
         if not out.isOpened():
-            st.error("❌ Impossibile inizializzare VideoWriter. Controlla i codec o i permessi di scrittura.")
+            st.error("❌ Impossibile inizializzare VideoWriter.")
             cap.release()
             return None
 
         frame_count = 0
+        prev_frame = None
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # Processa i frame video
         while cap.isOpened() and frame_count < actual_total_frames:
             ret, frame = cap.read()
             if not ret:
@@ -555,13 +690,22 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
 
             processed_frame = frame
             try:
-                # Applica keyframe envelope al parametro principale se attivo
                 current_params = params
                 if kf_envelope is not None and isinstance(params, tuple) and frame_count < len(kf_envelope):
                     kf_val = float(np.clip(kf_envelope[frame_count], 0.0, 3.0))
                     current_params = (kf_val,) + params[1:]
 
-                if effect_type == 'vhs':
+                if effect_type == 'pixel_sort':
+                    processed_frame = glitch_pixel_sort(frame, *current_params)
+                elif effect_type == 'channel_shift':
+                    processed_frame = glitch_channel_shift(frame, *current_params)
+                elif effect_type == 'datamosh':
+                    processed_frame = glitch_datamosh(frame, prev_frame, *current_params)
+                elif effect_type == 'byte_corrupt':
+                    processed_frame = glitch_byte_corrupt(frame, *current_params)
+                elif effect_type == 'slice_shift':
+                    processed_frame = glitch_slice_shift(frame, *current_params)
+                elif effect_type == 'vhs':
                     processed_frame = glitch_vhs_frame(frame, *current_params)
                 elif effect_type == 'distruttivo':
                     processed_frame = glitch_distruttivo_frame(frame, *current_params)
@@ -570,122 +714,118 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
                 elif effect_type == 'broken_tv':
                     processed_frame = glitch_broken_tv_frame(frame, *current_params)
                 elif effect_type == 'combined':
-                    # Applica effetti combinati sui frame
                     current_frame = frame
                     if params.get("apply_vhs"):
-                        current_frame = glitch_vhs_frame(
-                            current_frame,
-                            params.get("vhs_intensity", 1.0),
-                            params.get("vhs_scanline_freq", 1.0),
-                            params.get("vhs_color_shift", 1.0)
-                        )
+                        current_frame = glitch_vhs_frame(current_frame, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
                     if params.get("apply_distruttivo"):
-                        current_frame = glitch_distruttivo_frame(
-                            current_frame,
-                            params.get("dest_block_size", 1.0),
-                            params.get("dest_num_blocks", 1.0),
-                            params.get("dest_displacement", 1.0)
-                        )
+                        current_frame = glitch_distruttivo_frame(current_frame, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
                     if params.get("apply_noise"):
-                        current_frame = glitch_noise_frame(
-                            current_frame,
-                            params.get("noise_intensity", 1.0),
-                            params.get("noise_coverage", 1.0),
-                            params.get("noise_chaos", 1.0)
-                        )
+                        current_frame = glitch_noise_frame(current_frame, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
                     if params.get("apply_broken_tv"):
-                        current_frame = glitch_broken_tv_frame(
-                            current_frame,
-                            params.get("tv_shift_intensity", 1.0),
-                            params.get("tv_line_height", 1.0),
-                            params.get("tv_flicker_prob", 1.0)
-                        )
+                        current_frame = glitch_broken_tv_frame(current_frame, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
+                    if params.get("apply_pixel_sort"):
+                        current_frame = glitch_pixel_sort(current_frame, params.get("ps_intensity",1.0), params.get("ps_threshold",0.5), params.get("ps_direction",0.3))
+                    if params.get("apply_channel_shift"):
+                        current_frame = glitch_channel_shift(current_frame, params.get("cs_intensity",1.0), params.get("cs_spread",1.0), params.get("cs_mode",0.3))
+                    if params.get("apply_slice_shift"):
+                        current_frame = glitch_slice_shift(current_frame, params.get("ss_intensity",1.0), params.get("ss_num_slices",1.0), params.get("ss_drift",1.0))
                     processed_frame = current_frame
                 elif effect_type == 'random':
-                    # Applica un effetto casuale
                     random_level = params[0] if params else 1.0
-                    effects = [
-                        ('vhs', (random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level)),
-                        ('distruttivo', (random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level)),
-                        ('noise', (random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level)),
-                        ('broken_tv', (random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level, random.uniform(0.5, 1.5) * random_level))
-                    ]
-                    chosen_effect, chosen_params = random.choice(effects)
-                    if chosen_effect == 'vhs':
-                        processed_frame = glitch_vhs_frame(frame, *chosen_params)
-                    elif chosen_effect == 'distruttivo':
-                        processed_frame = glitch_distruttivo_frame(frame, *chosen_params)
-                    elif chosen_effect == 'noise':
-                        processed_frame = glitch_noise_frame(frame, *chosen_params)
-                    elif chosen_effect == 'broken_tv':
-                        processed_frame = glitch_broken_tv_frame(frame, *chosen_params)
+                    all_effects = ['pixel_sort','channel_shift','datamosh','byte_corrupt','slice_shift','vhs','broken_tv','noise','distruttivo']
+                    chosen = random.choice(all_effects)
+                    rp = tuple(random.uniform(0.5, 1.5) * random_level for _ in range(3))
+                    effect_fn = {
+                        'pixel_sort': glitch_pixel_sort, 'channel_shift': glitch_channel_shift,
+                        'byte_corrupt': glitch_byte_corrupt, 'slice_shift': glitch_slice_shift,
+                        'vhs': glitch_vhs_frame, 'broken_tv': glitch_broken_tv_frame,
+                        'noise': glitch_noise_frame, 'distruttivo': glitch_distruttivo_frame,
+                    }
+                    if chosen == 'datamosh':
+                        processed_frame = glitch_datamosh(frame, prev_frame, *rp)
+                    else:
+                        processed_frame = effect_fn[chosen](frame, *rp)
 
             except Exception as e:
-                st.warning(f"⚠️ Errore nel processing del frame {frame_count}: {e}")
                 processed_frame = frame
+
+            prev_frame = frame.copy()
+
+            # Crop al formato desiderato
+            if aspect_ratio != "Originale":
+                ph, pw = processed_frame.shape[:2]
+                cx = (pw - out_w) // 2
+                cy = (ph - out_h) // 2
+                processed_frame = processed_frame[cy:cy+out_h, cx:cx+out_w]
 
             out.write(processed_frame)
             frame_count += 1
-
-            # Aggiorna progress bar
             progress = frame_count / actual_total_frames
             progress_bar.progress(progress)
-            status_text.text(f"🎬 Processando frame {frame_count}/{actual_total_frames} ({progress*100:.1f}%)")
+            status_text.text(f"🎬 Frame {frame_count}/{actual_total_frames} ({progress*100:.1f}%)")
 
         cap.release()
         out.release()
 
-        # Se include_audio è True, processa anche l'audio
         fd2, final_output_path = tempfile.mkstemp(suffix='.mp4')
         os.close(fd2)
         
         if include_audio and check_ffmpeg():
             status_text.text("🎵 Processando audio...")
-            
-            # Estrai l'audio dal video originale
             audio_path = extract_audio(video_path)
-            
             if audio_path:
-                # Usa audio_params_override se disponibile, altrimenti fallback su params video
                 audio_params = audio_params_override if audio_params_override is not None else params
-                audio_effect_type = effect_type
-                
-                processed_audio_path = process_audio_glitch(audio_path, audio_effect_type, audio_params)
-                
-                # Combina video processato con audio processato
+                audio_effect_type = effect_type if effect_type not in ['pixel_sort','channel_shift','datamosh','byte_corrupt','slice_shift'] else 'noise'
+                processed_audio_path = process_audio_glitch(audio_path, audio_effect_type, audio_params if isinstance(audio_params, tuple) else (1.0, 1.0, 1.0))
                 if combine_video_audio(temp_video_path, processed_audio_path, final_output_path):
-                    status_text.text("✅ Video e audio processati con successo!")
-                    
-                    # Pulizia file temporanei
-                    try:
-                        os.unlink(temp_video_path)
-                        os.unlink(audio_path)
-                        os.unlink(processed_audio_path)
-                    except:
-                        pass
-                    
+                    status_text.text("✅ Video e audio processati!")
+                    for p in [temp_video_path, audio_path, processed_audio_path]:
+                        try: os.unlink(p)
+                        except: pass
                     return final_output_path
                 else:
-                    st.warning("⚠️ Errore nella combinazione audio/video. Ritorno solo il video.")
                     return temp_video_path
             else:
-                st.info("ℹ️ Nessun audio trovato nel video o errore nell'estrazione. Processando solo il video.")
                 return temp_video_path
         else:
-            # Se non include_audio o ffmpeg non disponibile, ritorna solo il video
-            if not check_ffmpeg():
-                st.warning("⚠️ FFmpeg non disponibile. Audio glitch disabilitato.")
             return temp_video_path
 
     except Exception as e:
-        st.error(f"❌ Errore durante il processing del video: {e}")
+        st.error(f"❌ Errore: {e}")
         cap.release()
-        if 'out' in locals():
-            out.release()
+        if 'out' in locals(): out.release()
         return None
 
 
-def recompress_h264(input_path):
+def get_crop_filter(w, h, aspect_ratio):
+    """Ritorna il filtro ffmpeg per centrare e croppare al rapporto desiderato."""
+    if aspect_ratio == "16:9":
+        target_w, target_h = 16, 9
+    elif aspect_ratio == "9:16":
+        target_w, target_h = 9, 16
+    elif aspect_ratio == "1:1":
+        target_w, target_h = 1, 1
+    else:
+        return None  # Originale, nessun crop
+
+    # Calcola dimensioni crop mantenendo il massimo possibile
+    ratio = target_w / target_h
+    if w / h > ratio:
+        # Video più largo: crop larghezza
+        new_w = int(h * ratio)
+        new_w -= new_w % 2
+        new_h = h
+    else:
+        # Video più alto: crop altezza
+        new_w = w
+        new_h = int(w / ratio)
+        new_h -= new_h % 2
+
+    x = (w - new_w) // 2
+    y = (h - new_h) // 2
+    return f"crop={new_w}:{new_h}:{x}:{y}"
+
+def recompress_h264(input_path, aspect_ratio="Originale"):
     """Ricomprime il video in H.264 con ffmpeg per ridurre le dimensioni."""
     fd, output_path = tempfile.mkstemp(suffix='_h264.mp4')
     os.close(fd)
@@ -796,7 +936,6 @@ def build_report(original_name, original_size_mb, output_size_mb,
 if 'report_data' not in st.session_state: st.session_state.report_data = ""
 if 'video_ready' not in st.session_state: st.session_state.video_ready = False
 if 'h264_path'   not in st.session_state: st.session_state.h264_path   = ""
-if 'prev_path'   not in st.session_state: st.session_state.prev_path    = ""
 if 'effect_name_saved' not in st.session_state: st.session_state.effect_name_saved = ""
 if 'orig_filename' not in st.session_state: st.session_state.orig_filename = ""
 if 'glitched_audio_path' not in st.session_state: st.session_state.glitched_audio_path = ""
@@ -820,21 +959,67 @@ if uploaded_file is not None:
     # Selettore dell'effetto
     effect_type = st.selectbox(
         "🎭 Scegli l'effetto glitch:",
-        ["vhs", "distruttivo", "noise", "combined", "broken_tv", "random"],
+        ["pixel_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift", "vhs", "broken_tv", "noise", "distruttivo", "combined", "random"],
         format_func=lambda x: {
-            "vhs": "📼 VHS Glitch",
-            "distruttivo": "💥 Distruttivo",
-            "noise": "📺 Noise",
-            "combined": "🌟 Combinato",
-            "broken_tv": "📻 Broken TV",
-            "random": "🎲 Random"
+            "pixel_sort":    "🔀 Pixel Sort",
+            "channel_shift": "🌈 Channel Shift",
+            "datamosh":      "💾 Datamosh",
+            "byte_corrupt":  "🦠 Byte Corrupt",
+            "slice_shift":   "✂️ Slice Shift",
+            "vhs":           "📼 VHS",
+            "broken_tv":     "📻 Broken TV",
+            "noise":         "📺 Noise",
+            "distruttivo":   "💥 Distruttivo",
+            "combined":      "🌟 Combinato",
+            "random":        "🎲 Random"
         }[x]
     )
 
     # Parametri specifici per ogni effetto
     params = {}
-    
-    if effect_type == 'vhs':
+    audio_params_override = None
+
+    if effect_type == 'pixel_sort':
+        st.subheader("🔀 Pixel Sort")
+        col1, col2, col3 = st.columns(3)
+        with col1: ps_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: ps_threshold  = st.slider("Soglia luma", 0.1, 1.0, 0.5, 0.05)
+        with col3: ps_direction  = st.slider("Direzione (0=righe, 1=col)", 0.0, 1.0, 0.3, 0.05)
+        params = (ps_intensity, ps_threshold, ps_direction)
+
+    elif effect_type == 'channel_shift':
+        st.subheader("🌈 Channel Shift")
+        col1, col2, col3 = st.columns(3)
+        with col1: cs_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: cs_spread    = st.slider("Spread", 0.1, 3.0, 1.0, 0.1)
+        with col3: cs_mode      = st.slider("Verticale (0=no, 1=sì)", 0.0, 1.0, 0.3, 0.05)
+        params = (cs_intensity, cs_spread, cs_mode)
+
+    elif effect_type == 'datamosh':
+        st.subheader("💾 Datamosh")
+        col1, col2, col3 = st.columns(3)
+        with col1: dm_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: dm_block_size = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
+        with col3: dm_chaos      = st.slider("Chaos", 0.1, 3.0, 1.0, 0.1)
+        params = (dm_intensity, dm_block_size, dm_chaos)
+
+    elif effect_type == 'byte_corrupt':
+        st.subheader("🦠 Byte Corrupt")
+        col1, col2, col3 = st.columns(3)
+        with col1: bc_intensity   = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: bc_chunk_size  = st.slider("Chunk size", 0.1, 3.0, 1.0, 0.1)
+        with col3: bc_randomize   = st.slider("Random (0=dup, 1=rand)", 0.0, 1.0, 0.7, 0.05)
+        params = (bc_intensity, bc_chunk_size, bc_randomize)
+
+    elif effect_type == 'slice_shift':
+        st.subheader("✂️ Slice Shift")
+        col1, col2, col3 = st.columns(3)
+        with col1: ss_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: ss_num_slices = st.slider("Numero slice", 0.1, 3.0, 1.0, 0.1)
+        with col3: ss_drift      = st.slider("Drift", 0.1, 3.0, 1.0, 0.1)
+        params = (ss_intensity, ss_num_slices, ss_drift)
+
+    elif effect_type == 'vhs':
         st.subheader("📼 Parametri VHS")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -1029,10 +1214,10 @@ if uploaded_file is not None:
     # Limita frame per video lunghi
     max_frames = st.number_input("🎬 Limite frame (0 = nessun limite)", min_value=0, max_value=10000, value=0)
 
-    # KEYFRAME — solo per effetti singoli
+    # KEYFRAME — solo per effetti singoli (non combined/random)
     kf_df = None
     use_keyframes = False
-    if effect_type in ['vhs', 'distruttivo', 'noise', 'broken_tv']:
+    if effect_type not in ['combined', 'random']:
         st.markdown("---")
         use_keyframes = st.toggle("⏱️ Animazione intensità nel tempo",
             help="Interpola l'intensità dell'effetto dall'inizio alla fine del video.")
@@ -1042,12 +1227,7 @@ if uploaded_file is not None:
                 kf_start = st.slider("Intensità inizio", 0.0, 3.0, 0.5, 0.1, key="kf_start")
             with col_kf2:
                 kf_end = st.slider("Intensità fine", 0.0, 3.0, 1.5, 0.1, key="kf_end")
-            # Costruisci kf_df sintetico per compatibilità con interpolate_keyframes
             import pandas as pd
-            kf_df = pd.DataFrame({"Secondo": [0.0, 1.0], "Intensita'": [kf_start, kf_end]})
-            # I secondi vengono scalati in interpolate_keyframes tramite fps*frames,
-            # quindi usiamo 0.0 e 1.0 come frazioni normalizzate — aggiustiamo qui
-            # con la durata reale del video
             cap_tmp = cv2.VideoCapture(video_path)
             fps_tmp = cap_tmp.get(cv2.CAP_PROP_FPS) or 24
             frames_tmp = cap_tmp.get(cv2.CAP_PROP_FRAME_COUNT) or 0
@@ -1055,48 +1235,72 @@ if uploaded_file is not None:
             dur_est = round(frames_tmp / fps_tmp, 1) if fps_tmp > 0 else 10.0
             kf_df = pd.DataFrame({"Secondo": [0.0, dur_est], "Intensita'": [kf_start, kf_end]})
 
-    # --- ANTEPRIMA ISTANTANEA (1 frame) ---
-    if st.button("👁️ Anteprima effetto (1 frame)"):
-        cap_prev = cv2.VideoCapture(video_path)
-        # Salta al frame centrale per una preview più rappresentativa
-        total_f = int(cap_prev.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap_prev.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_f // 3))
-        ret_p, frame_p = cap_prev.read()
-        cap_prev.release()
-        if ret_p:
-            try:
-                if effect_type == 'vhs':
-                    prev_frame = glitch_vhs_frame(frame_p, *params)
-                elif effect_type == 'distruttivo':
-                    prev_frame = glitch_distruttivo_frame(frame_p, *params)
-                elif effect_type == 'noise':
-                    prev_frame = glitch_noise_frame(frame_p, *params)
-                elif effect_type == 'broken_tv':
-                    prev_frame = glitch_broken_tv_frame(frame_p, *params)
-                elif effect_type == 'combined':
-                    prev_frame = frame_p.copy()
-                    if params.get("apply_vhs"):
-                        prev_frame = glitch_vhs_frame(prev_frame, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
-                    if params.get("apply_distruttivo"):
-                        prev_frame = glitch_distruttivo_frame(prev_frame, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
-                    if params.get("apply_noise"):
-                        prev_frame = glitch_noise_frame(prev_frame, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
-                    if params.get("apply_broken_tv"):
-                        prev_frame = glitch_broken_tv_frame(prev_frame, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
-                elif effect_type == 'random':
-                    random_level = params[0] if params else 1.0
-                    chosen = random.choice(['vhs','distruttivo','noise','broken_tv'])
-                    rp = tuple(random.uniform(0.5, 1.5) * random_level for _ in range(3))
-                    prev_frame = {'vhs': glitch_vhs_frame, 'distruttivo': glitch_distruttivo_frame, 'noise': glitch_noise_frame, 'broken_tv': glitch_broken_tv_frame}[chosen](frame_p, *rp)
-                else:
-                    prev_frame = frame_p
-                # Converti BGR→RGB e mostra
-                prev_rgb = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2RGB)
-                st.image(prev_rgb, caption=f"🖼️ Anteprima effetto: {effect_type}", use_column_width=True)
-            except Exception as e:
-                st.warning(f"Errore anteprima: {e}")
-        else:
-            st.warning("Impossibile leggere il frame dal video.")
+    # --- ANTEPRIMA LIVE (si aggiorna ad ogni cambio slider) ---
+    st.markdown("---")
+    st.caption("🖼️ Anteprima live")
+    try:
+        cap_live = cv2.VideoCapture(video_path)
+        total_f_live = int(cap_live.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_live.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_f_live // 3))
+        ret_live, frame_live = cap_live.read()
+        cap_live.release()
+        if ret_live:
+            if effect_type == 'pixel_sort':
+                prev_frame = glitch_pixel_sort(frame_live, *params)
+            elif effect_type == 'channel_shift':
+                prev_frame = glitch_channel_shift(frame_live, *params)
+            elif effect_type == 'datamosh':
+                # per preview datamosh usiamo frame_live come prev (stesso frame = ghosting)
+                prev_frame = glitch_datamosh(frame_live, frame_live, *params)
+            elif effect_type == 'byte_corrupt':
+                prev_frame = glitch_byte_corrupt(frame_live, *params)
+            elif effect_type == 'slice_shift':
+                prev_frame = glitch_slice_shift(frame_live, *params)
+            elif effect_type == 'vhs':
+                prev_frame = glitch_vhs_frame(frame_live, *params)
+            elif effect_type == 'distruttivo':
+                prev_frame = glitch_distruttivo_frame(frame_live, *params)
+            elif effect_type == 'noise':
+                prev_frame = glitch_noise_frame(frame_live, *params)
+            elif effect_type == 'broken_tv':
+                prev_frame = glitch_broken_tv_frame(frame_live, *params)
+            elif effect_type == 'combined':
+                prev_frame = frame_live.copy()
+                if params.get("apply_vhs"):
+                    prev_frame = glitch_vhs_frame(prev_frame, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
+                if params.get("apply_distruttivo"):
+                    prev_frame = glitch_distruttivo_frame(prev_frame, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+                if params.get("apply_noise"):
+                    prev_frame = glitch_noise_frame(prev_frame, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
+                if params.get("apply_broken_tv"):
+                    prev_frame = glitch_broken_tv_frame(prev_frame, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
+                if params.get("apply_pixel_sort"):
+                    prev_frame = glitch_pixel_sort(prev_frame, params.get("ps_intensity",1.0), params.get("ps_threshold",0.5), params.get("ps_direction",0.3))
+                if params.get("apply_channel_shift"):
+                    prev_frame = glitch_channel_shift(prev_frame, params.get("cs_intensity",1.0), params.get("cs_spread",1.0), params.get("cs_mode",0.3))
+                if params.get("apply_slice_shift"):
+                    prev_frame = glitch_slice_shift(prev_frame, params.get("ss_intensity",1.0), params.get("ss_num_slices",1.0), params.get("ss_drift",1.0))
+            elif effect_type == 'random':
+                random_level = params[0] if params else 1.0
+                chosen = random.choice(['pixel_sort','channel_shift','byte_corrupt','slice_shift','vhs','broken_tv','noise','distruttivo'])
+                rp = tuple(random.uniform(0.5, 1.5) * random_level for _ in range(3))
+                fn_map = {'pixel_sort': glitch_pixel_sort, 'channel_shift': glitch_channel_shift, 'byte_corrupt': glitch_byte_corrupt, 'slice_shift': glitch_slice_shift, 'vhs': glitch_vhs_frame, 'broken_tv': glitch_broken_tv_frame, 'noise': glitch_noise_frame, 'distruttivo': glitch_distruttivo_frame}
+                prev_frame = fn_map[chosen](frame_live, *rp)
+            else:
+                prev_frame = frame_live
+            prev_rgb = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2RGB)
+            st.image(prev_rgb, use_column_width=True)
+    except Exception as e:
+        st.caption(f"Anteprima non disponibile: {e}")
+
+    # --- PROPORZIONI EXPORT ---
+    st.markdown("---")
+    st.subheader("📐 Proporzioni export")
+    aspect_ratio = st.radio(
+        "Formato output:",
+        ["Originale", "16:9", "9:16", "1:1"],
+        horizontal=True
+    )
 
     # Bottone per processare
     if st.button("🚀 Processa Video"):
@@ -1115,56 +1319,37 @@ if uploaded_file is not None:
                         frames_info = min(frames_info, max_frames)
                     kf_envelope = interpolate_keyframes(kf_df, fps_info, frames_info)
 
-                result_path = process_video(video_path, effect_type, params, max_frames, include_audio, kf_envelope, audio_params_override)
+                result_path = process_video(video_path, effect_type, params, max_frames, include_audio, kf_envelope, audio_params_override, aspect_ratio)
                 
                 if result_path:
-                    st.success("✅ Video processato con successo!")
-
-                    # Ricomprimi in H.264
-                    with st.spinner("🗜️ Ottimizzazione H.264..."):
+                    st.success("✅ Video processato!")
+                    with st.spinner("🗜️ H.264..."):
                         h264_path = recompress_h264(result_path)
-                        time.sleep(0.5)
 
-                    # Info dimensioni (prima di cancellare video_path)
                     orig_size  = get_file_size_mb(video_path)
                     fps_v, w_v, h_v, frames_v, dur_v = get_video_info(video_path)
                     out_size   = get_file_size_mb(h264_path)
 
-                    # Preview video 10s a 360p
-                    with st.spinner("Generando preview..."):
-                        fd_prev, prev_path = tempfile.mkstemp(suffix="_preview.mp4")
-                        os.close(fd_prev)
-                        subprocess.run([
-                            'ffmpeg', '-i', h264_path,
-                            '-t', '10',
-                            '-vf', 'scale=-2:360',
-                            '-c:v', 'libx264', '-crf', '30', '-preset', 'ultrafast',
-                            '-c:a', 'aac', '-b:a', '64k',
-                            prev_path, '-y'
-                        ], capture_output=True)
-
-                    # Report
                     st.session_state.report_data = build_report(
                         uploaded_file.name, orig_size, out_size,
                         fps_v, w_v, h_v, frames_v, dur_v,
                         effect_type, params, include_audio, kf_df
                     )
                     st.session_state.h264_path = h264_path
-                    st.session_state.prev_path = prev_path
                     st.session_state.effect_name_saved = {
-                        "vhs": "VHS", "distruttivo": "Distruttivo",
-                        "noise": "Noise", "combined": "Combinato",
-                        "broken_tv": "BrokenTV", "random": "Random"
+                        "pixel_sort":"PixelSort","channel_shift":"ChannelShift",
+                        "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
+                        "slice_shift":"SliceShift","vhs":"VHS","distruttivo":"Distruttivo",
+                        "noise":"Noise","combined":"Combinato","broken_tv":"BrokenTV","random":"Random"
                     }[effect_type]
                     st.session_state.orig_filename = uploaded_file.name
                     st.session_state.video_ready = True
 
-                    # Pulizia file intermedi DOPO aver usato video_path
                     for p in [result_path, video_path]:
                         try: os.unlink(p)
                         except: pass
                 else:
-                    st.error("❌ Errore durante il processing del video.")
+                    st.error("❌ Errore durante il processing.")
 
 else:
     st.info("👆 Carica un video per iniziare!")
@@ -1222,14 +1407,9 @@ if uploaded_audio_file is not None and check_ffmpeg():
             st.download_button("📥 Scarica Audio Glitch (mp3)", af,
                 file_name=f"glitch_{orig_stem}.mp3", mime="audio/mpeg", key="down_audio")
 
-# RISULTATI PERSISTENTI — fuori dall'if uploaded_file, sopravvivono al re-run
+# RISULTATI PERSISTENTI
 if st.session_state.video_ready:
     st.markdown("---")
-    st.caption("▶️ Preview (10s, 360p) — scarica per la versione completa")
-    if st.session_state.prev_path and os.path.exists(st.session_state.prev_path):
-        with open(st.session_state.prev_path, 'rb') as pf:
-            st.video(pf.read())
-
     c_d1, c_d2 = st.columns(2)
     with c_d1:
         if st.session_state.h264_path and os.path.exists(st.session_state.h264_path):
@@ -1248,7 +1428,6 @@ if st.session_state.video_ready:
             file_name="report_glitch.txt",
             key="down_r"
         )
-
     st.text_area("📄 REPORT", st.session_state.report_data, height=320)
 
 # Footer
