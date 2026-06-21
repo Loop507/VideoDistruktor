@@ -18,9 +18,13 @@ st.set_page_config(page_title="VideoDistruktor by loop507", layout="centered")
 
 # Modifica del titolo con caratteri più piccoli per "by loop507"
 st.markdown("<h1>🎬🔥 VideoDistruktor <span style='font-size:0.5em;'>by loop507</span></h1>", unsafe_allow_html=True)
-st.write("Carica un video e genera versioni glitchate: VHS, Distruttivo, Noise, Combinato, Broken TV o Random! **Ora con audio glitch!**")
+st.write("Carica un video e genera versioni glitchate: VHS, Distruttivo, Noise, Combinato, Broken TV o Random! **Audio glitch su video e file audio separati (mp3/wav/aac)!**")
 
-# Controlla se ffmpeg è disponibile
+# File uploader per audio separato (opzionale)
+uploaded_audio_file = st.file_uploader("🎵 Carica audio separato da glitchare (opzionale — mp3/wav/aac)", type=["mp3", "wav", "aac", "ogg", "flac", "m4a"])
+
+# Controlla se ffmpeg è disponibile (cached per evitare subprocess ad ogni re-run)
+@st.cache_data
 def check_ffmpeg():
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
@@ -41,8 +45,9 @@ def pil_to_frame(pil_img):
 
 # --- Funzioni degli effetti audio ---
 def extract_audio(video_path):
-    """Estrae l'audio dal video usando ffmpeg"""
-    audio_path = tempfile.mktemp(suffix='.wav')
+    """Estrae l'audio dal video usando ffmpeg e lo converte in WAV 44100Hz stereo"""
+    fd, audio_path = tempfile.mkstemp(suffix='.wav')
+    os.close(fd)
     try:
         cmd = ['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', audio_path, '-y']
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -54,39 +59,47 @@ def extract_audio(video_path):
         st.warning(f"⚠️ Errore nell'estrazione audio: {e}")
         return None
 
-def glitch_audio_vhs(audio, sr, intensity=1.0, wow_flutter=1.0, tape_hiss=1.0):
-    """Effetto audio VHS con wow&flutter e tape hiss"""
+def convert_audio_to_wav(audio_path_in):
+    """Converte qualsiasi formato audio (mp3, aac, ogg...) in WAV 44100Hz stereo tramite ffmpeg"""
+    fd, wav_path = tempfile.mkstemp(suffix='.wav')
+    os.close(fd)
     try:
-        audio_out = audio.copy()
-        
-        # Wow & Flutter (modulazione di pitch)
+        cmd = ['ffmpeg', '-i', audio_path_in, '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', wav_path, '-y']
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            st.warning(f"⚠️ Conversione audio fallita: {result.stderr[-300:]}")
+            return None
+        return wav_path
+    except Exception as e:
+        st.warning(f"⚠️ Errore conversione audio: {e}")
+        return None
+
+def glitch_audio_vhs(audio, sr, intensity=1.0, wow_flutter=1.0, tape_hiss=1.0):
+    """Effetto audio VHS con wow&flutter e tape hiss — vectorizzato NumPy"""
+    try:
+        audio_out = audio.copy().astype(np.float32)
+
+        # Wow & Flutter — shift via interpolazione vettorizzata
         if wow_flutter > 0:
-            flutter_freq = 0.5 + (2.0 * wow_flutter)  # Frequenza modulazione
-            flutter_depth = 0.02 * wow_flutter  # Profondità modulazione
-            time_vec = np.arange(len(audio_out)) / sr
-            modulation = np.sin(2 * np.pi * flutter_freq * time_vec) * flutter_depth
-            
-            # Applica modulazione (simulazione di pitch shift)
-            for i in range(len(audio_out)):
-                if i > 0:
-                    shift_samples = int(modulation[i] * sr * 0.001)  # Micro-shift
-                    if abs(shift_samples) < len(audio_out) - i:
-                        audio_out[i] = audio_out[i + shift_samples] if shift_samples < 0 else audio_out[max(0, i - shift_samples)]
-        
-        # Tape Hiss (rumore ad alta frequenza)
+            flutter_freq  = 0.5 + 2.0 * wow_flutter
+            flutter_depth = 0.008 * wow_flutter          # max ~8ms di shift
+            n   = len(audio_out)
+            t   = np.arange(n, dtype=np.float32) / sr
+            mod = np.sin(2 * np.pi * flutter_freq * t) * flutter_depth * sr  # in sample
+            idx = np.clip(np.arange(n) - mod.astype(np.int32), 0, n - 1)
+            audio_out = audio_out[idx]
+
+        # Tape Hiss — filtro passa-alto vettorizzato
         if tape_hiss > 0:
-            hiss_intensity = 0.005 * tape_hiss
-            hiss = np.random.normal(0, hiss_intensity, len(audio_out))
-            # Filtro passa-alto per simulare il hiss delle cassette
+            hiss = np.random.normal(0, 0.005 * tape_hiss, len(audio_out)).astype(np.float32)
             b, a = signal.butter(4, 2000, 'highpass', fs=sr)
-            hiss_filtered = signal.filtfilt(b, a, hiss)
-            audio_out += hiss_filtered
-        
-        # Compressione e saturazione tipica del VHS
+            audio_out += signal.filtfilt(b, a, hiss).astype(np.float32)
+
+        # Saturazione / compressione VHS
         if intensity > 0:
-            compression_ratio = 1.0 + (2.0 * intensity)
-            audio_out = np.tanh(audio_out * compression_ratio) / compression_ratio
-            
+            ratio = 1.0 + 2.0 * intensity
+            audio_out = np.tanh(audio_out * ratio) / ratio
+
         return np.clip(audio_out, -1.0, 1.0)
     except Exception as e:
         st.warning(f"Errore effetto VHS audio: {e}")
@@ -129,94 +142,76 @@ def glitch_audio_destructive(audio, sr, chaos_level=1.0, skip_prob=1.0, reverse_
         return audio
 
 def glitch_audio_noise(audio, sr, noise_intensity=1.0, digital_artifacts=1.0, bit_crush=1.0):
-    """Effetto audio noise con artefatti digitali e bit crushing"""
+    """Effetto audio noise con artefatti digitali e bit crushing — vectorizzato NumPy"""
     try:
-        audio_out = audio.copy()
-        
+        audio_out = audio.copy().astype(np.float32)
+
         # Noise classico
         if noise_intensity > 0:
-            noise_level = 0.01 * noise_intensity
-            noise = np.random.normal(0, noise_level, len(audio_out))
-            audio_out += noise
-        
-        # Artefatti digitali (dropouts)
+            audio_out += np.random.normal(0, 0.01 * noise_intensity, len(audio_out)).astype(np.float32)
+
+        # Artefatti digitali (dropout) — vettorizzato con maschera booleana
         if digital_artifacts > 0:
             dropout_prob = 0.001 * digital_artifacts
-            for i in range(len(audio_out)):
-                if random.random() < dropout_prob:
-                    # Dropout di durata variabile
-                    dropout_length = random.randint(1, int(sr * 0.01))  # Fino a 10ms
-                    end_idx = min(i + dropout_length, len(audio_out))
-                    audio_out[i:end_idx] = 0
-        
-        # Bit Crushing (riduzione risoluzione)
+            # Genera punti di inizio dropout
+            starts = np.where(np.random.random(len(audio_out)) < dropout_prob)[0]
+            for s in starts:
+                length = random.randint(1, max(1, int(sr * 0.01)))
+                audio_out[s:s + length] = 0
+
+        # Bit Crushing vettorizzato
         if bit_crush > 0:
-            # Riduce i bit di risoluzione
-            bits = max(1, int(16 - (12 * bit_crush)))  # Da 16 bit a 4 bit
-            scale = 2**(bits-1)
+            bits  = max(1, int(16 - 12 * bit_crush))
+            scale = float(2 ** (bits - 1))
             audio_out = np.round(audio_out * scale) / scale
-        
+
         return np.clip(audio_out, -1.0, 1.0)
     except Exception as e:
         st.warning(f"Errore effetto noise audio: {e}")
         return audio
 
 def glitch_audio_broken_tv(audio, sr, static_intensity=1.0, channel_separation=1.0, frequency_drift=1.0):
-    """Effetto audio broken TV con static, separazione canali e drift"""
+    """Effetto audio broken TV — vectorizzato NumPy"""
     try:
-        audio_out = audio.copy()
-        
-        # Static (rumore bianco intermittente)
+        audio_out = audio.copy().astype(np.float32)
+
+        # Static intermittente
         if static_intensity > 0:
-            static_prob = 0.02 * static_intensity
-            static_level = 0.1 * static_intensity
-            
-            for i in range(0, len(audio_out), int(sr * 0.1)):  # Ogni 100ms
+            static_prob  = 0.02 * static_intensity
+            static_level = 0.1  * static_intensity
+            step = max(1, int(sr * 0.1))
+            for i in range(0, len(audio_out), step):
                 if random.random() < static_prob:
-                    static_length = random.randint(int(sr * 0.01), int(sr * 0.1))  # 10-100ms
-                    end_idx = min(i + static_length, len(audio_out))
-                    static_noise = np.random.uniform(-static_level, static_level, end_idx - i)
-                    
-                    if len(audio_out.shape) > 1:  # Stereo
-                        for ch in range(audio_out.shape[1]):
-                            audio_out[i:end_idx, ch] = static_noise
-                    else:  # Mono
-                        audio_out[i:end_idx] = static_noise
-        
-        # Separazione canali (simula problemi di connessione)
-        if channel_separation > 0 and len(audio_out.shape) > 1:
-            separation_prob = 0.01 * channel_separation
-            
-            for i in range(0, len(audio_out), int(sr * 0.2)):
-                if random.random() < separation_prob:
-                    # Uno dei canali va in mute per un periodo
-                    mute_length = random.randint(int(sr * 0.05), int(sr * 0.3))
-                    end_idx = min(i + mute_length, len(audio_out))
-                    channel_to_mute = random.randint(0, 1)
-                    audio_out[i:end_idx, channel_to_mute] = 0
-        
-        # Frequency Drift (simula deriva della frequenza di campionamento)
+                    length  = random.randint(int(sr * 0.01), int(sr * 0.1))
+                    end_idx = min(i + length, len(audio_out))
+                    noise   = np.random.uniform(-static_level, static_level, end_idx - i).astype(np.float32)
+                    if audio_out.ndim > 1:
+                        audio_out[i:end_idx, :] = noise[:, np.newaxis]
+                    else:
+                        audio_out[i:end_idx] = noise
+
+        # Separazione canali
+        if channel_separation > 0 and audio_out.ndim > 1:
+            sep_prob = 0.01 * channel_separation
+            step2 = max(1, int(sr * 0.2))
+            for i in range(0, len(audio_out), step2):
+                if random.random() < sep_prob:
+                    length  = random.randint(int(sr * 0.05), int(sr * 0.3))
+                    end_idx = min(i + length, len(audio_out))
+                    ch      = random.randint(0, audio_out.shape[1] - 1)
+                    audio_out[i:end_idx, ch] = 0
+
+        # Frequency Drift — vettorizzato con fancy indexing
         if frequency_drift > 0:
-            drift_amount = 0.02 * frequency_drift  # Fino al 2%
-            time_vec = np.arange(len(audio_out)) / sr
-            drift = np.sin(2 * np.pi * 0.1 * time_vec) * drift_amount  # Drift lento
-            
-            # Applica il drift (approssimazione)
-            for i in range(1, len(audio_out)):
-                drift_samples = int(drift[i] * sr * 0.001)
-                if abs(drift_samples) < len(audio_out) - i:
-                    if len(audio_out.shape) > 1:  # Stereo
-                        for ch in range(audio_out.shape[1]):
-                            if drift_samples > 0:
-                                audio_out[i, ch] = audio_out[max(0, i - drift_samples), ch]
-                            elif drift_samples < 0:
-                                audio_out[i, ch] = audio_out[min(len(audio_out)-1, i - drift_samples), ch]
-                    else:  # Mono
-                        if drift_samples > 0:
-                            audio_out[i] = audio_out[max(0, i - drift_samples)]
-                        elif drift_samples < 0:
-                            audio_out[i] = audio_out[min(len(audio_out)-1, i - drift_samples)]
-        
+            n           = len(audio_out)
+            t           = np.arange(n, dtype=np.float32) / sr
+            drift_samps = (np.sin(2 * np.pi * 0.1 * t) * 0.02 * frequency_drift * sr).astype(np.int32)
+            idx         = np.clip(np.arange(n) - drift_samps, 0, n - 1)
+            if audio_out.ndim > 1:
+                audio_out = audio_out[idx, :]
+            else:
+                audio_out = audio_out[idx]
+
         return np.clip(audio_out, -1.0, 1.0)
     except Exception as e:
         st.warning(f"Errore effetto broken TV audio: {e}")
@@ -341,7 +336,8 @@ def process_audio_glitch(audio_path, effect_type, params):
             return process_audio_glitch(audio_path, chosen_effect, chosen_params)
         
         # Salva l'audio processato
-        output_audio_path = tempfile.mktemp(suffix='.wav')
+        fd, output_audio_path = tempfile.mkstemp(suffix='.wav')
+        os.close(fd)
         sf.write(output_audio_path, processed_audio, sr)
         
         return output_audio_path
@@ -536,7 +532,8 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
         actual_total_frames = min(total_frames, max_frames)
 
     # Video temporaneo senza audio
-    temp_video_path = tempfile.mktemp(suffix='_no_audio.mp4')
+    fd1, temp_video_path = tempfile.mkstemp(suffix='_no_audio.mp4')
+    os.close(fd1)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
     try:
@@ -639,7 +636,8 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
         out.release()
 
         # Se include_audio è True, processa anche l'audio
-        final_output_path = tempfile.mktemp(suffix='.mp4')
+        fd2, final_output_path = tempfile.mkstemp(suffix='.mp4')
+        os.close(fd2)
         
         if include_audio and check_ffmpeg():
             status_text.text("🎵 Processando audio...")
@@ -702,7 +700,8 @@ def process_video(video_path, effect_type, params, max_frames=None, include_audi
 
 def recompress_h264(input_path):
     """Ricomprime il video in H.264 con ffmpeg per ridurre le dimensioni."""
-    output_path = tempfile.mktemp(suffix='_h264.mp4')
+    fd, output_path = tempfile.mkstemp(suffix='_h264.mp4')
+    os.close(fd)
     try:
         cmd = [
             'ffmpeg', '-i', input_path,
@@ -811,8 +810,10 @@ if 'report_data' not in st.session_state: st.session_state.report_data = ""
 if 'video_ready' not in st.session_state: st.session_state.video_ready = False
 if 'h264_path'   not in st.session_state: st.session_state.h264_path   = ""
 if 'prev_path'   not in st.session_state: st.session_state.prev_path    = ""
+if 'thumb_path'  not in st.session_state: st.session_state.thumb_path   = ""
 if 'effect_name_saved' not in st.session_state: st.session_state.effect_name_saved = ""
 if 'orig_filename' not in st.session_state: st.session_state.orig_filename = ""
+if 'glitched_audio_path' not in st.session_state: st.session_state.glitched_audio_path = ""
 
 if uploaded_file is not None:
     # Controlla ffmpeg per l'audio
@@ -1093,17 +1094,32 @@ if uploaded_file is not None:
                     out_size   = get_file_size_mb(h264_path)
                     fps_v, w_v, h_v, frames_v, dur_v = get_video_info(video_path)
 
-                    # Preview ridotta a 480p
+                    # Preview ridotta: prima un frame glitchato (thumbnail immediato), poi video 5-10s
                     with st.spinner("Generando preview..."):
-                        prev_path = tempfile.mktemp(suffix="_preview.mp4")
+                        # 1. Thumbnail: primo frame glitchato
+                        fd_prev, prev_path = tempfile.mkstemp(suffix="_preview.mp4")
+                        os.close(fd_prev)
+                        # Estrai max 10s di preview dal video glitchato
                         subprocess.run([
                             'ffmpeg', '-i', h264_path,
-                            '-vf', 'scale=-2:480',
-                            '-c:v', 'libx264', '-crf', '28', '-preset', 'fast',
-                            '-c:a', 'aac', '-b:a', '96k',
+                            '-t', '10',
+                            '-vf', 'scale=-2:360',
+                            '-c:v', 'libx264', '-crf', '30', '-preset', 'ultrafast',
+                            '-c:a', 'aac', '-b:a', '64k',
                             prev_path, '-y'
                         ], capture_output=True)
-                        time.sleep(0.5)
+
+                        # 2. Thumbnail JPEG dal primo frame del preview
+                        fd_thumb, thumb_path = tempfile.mkstemp(suffix="_thumb.jpg")
+                        os.close(fd_thumb)
+                        subprocess.run([
+                            'ffmpeg', '-i', h264_path,
+                            '-vframes', '1', '-q:v', '3',
+                            '-vf', 'scale=-2:360',
+                            thumb_path, '-y'
+                        ], capture_output=True)
+
+                        time.sleep(0.3)
 
                     # Report
                     st.session_state.report_data = build_report(
@@ -1113,6 +1129,7 @@ if uploaded_file is not None:
                     )
                     st.session_state.h264_path = h264_path
                     st.session_state.prev_path = prev_path
+                    st.session_state.thumb_path = thumb_path
                     st.session_state.effect_name_saved = {
                         "vhs": "VHS", "distruttivo": "Distruttivo",
                         "noise": "Noise", "combined": "Combinato",
@@ -1124,22 +1141,79 @@ if uploaded_file is not None:
                     # Pulizia solo del file intermedio
                     try: os.unlink(result_path)
                     except: pass
+                    # Pulizia video temp originale solo dopo processing completato
+                    try: os.unlink(video_path)
+                    except: pass
                 else:
                     st.error("❌ Errore durante il processing del video.")
-
-    # Pulizia file temporaneo
-    try:
-        os.unlink(video_path)
-    except:
-        pass
 
 else:
     st.info("👆 Carica un video per iniziare!")
 
+# --- AUDIO STANDALONE GLITCH (fuori dall'if video) ---
+if uploaded_audio_file is not None and check_ffmpeg():
+    st.markdown("---")
+    st.subheader("🎵 Glitch Audio Standalone")
+    
+    ffmpeg_available = check_ffmpeg()
+    audio_effect = st.selectbox(
+        "Effetto audio:",
+        ["vhs", "distruttivo", "noise", "broken_tv"],
+        format_func=lambda x: {"vhs":"📼 VHS","distruttivo":"💥 Distruttivo","noise":"📺 Noise","broken_tv":"📻 Broken TV"}[x],
+        key="audio_effect_sel"
+    )
+    col1, col2, col3 = st.columns(3)
+    with col1: a_p1 = st.slider("Param 1", 0.1, 3.0, 1.0, 0.1, key="a_p1")
+    with col2: a_p2 = st.slider("Param 2", 0.1, 3.0, 1.0, 0.1, key="a_p2")
+    with col3: a_p3 = st.slider("Param 3", 0.1, 3.0, 1.0, 0.1, key="a_p3")
+
+    if st.button("🔊 Glitcha Audio"):
+        with st.spinner("Glitchando audio..."):
+            ext = os.path.splitext(uploaded_audio_file.name)[1].lower()
+            fd_ain, audio_in_path = tempfile.mkstemp(suffix=ext)
+            os.close(fd_ain)
+            with open(audio_in_path, 'wb') as f:
+                f.write(uploaded_audio_file.read())
+            
+            # Converti in WAV per processing
+            wav_path = convert_audio_to_wav(audio_in_path)
+            if wav_path:
+                glitched_wav = process_audio_glitch(wav_path, audio_effect, (a_p1, a_p2, a_p3))
+                if glitched_wav:
+                    # Converti in mp3 per output leggero
+                    fd_out, mp3_out = tempfile.mkstemp(suffix='_glitch.mp3')
+                    os.close(fd_out)
+                    subprocess.run([
+                        'ffmpeg', '-i', glitched_wav,
+                        '-codec:a', 'libmp3lame', '-qscale:a', '4',
+                        mp3_out, '-y'
+                    ], capture_output=True)
+                    st.session_state.glitched_audio_path = mp3_out
+                    st.session_state.glitched_audio_name = uploaded_audio_file.name
+                    # Pulizia temp
+                    for p in [audio_in_path, wav_path, glitched_wav]:
+                        try: os.unlink(p)
+                        except: pass
+                    st.success("✅ Audio glitchato!")
+
+    if st.session_state.glitched_audio_path and os.path.exists(st.session_state.glitched_audio_path):
+        st.audio(st.session_state.glitched_audio_path)
+        with open(st.session_state.glitched_audio_path, 'rb') as af:
+            orig_stem = os.path.splitext(st.session_state.get('glitched_audio_name', 'audio'))[0]
+            st.download_button("📥 Scarica Audio Glitch (mp3)", af,
+                file_name=f"glitch_{orig_stem}.mp3", mime="audio/mpeg", key="down_audio")
+
 # RISULTATI PERSISTENTI — fuori dall'if uploaded_file, sopravvivono al re-run
 if st.session_state.video_ready:
     st.markdown("---")
-    st.caption("Preview (480p) — scarica per la versione completa")
+    
+    # Thumbnail immediato + preview video 10s
+    col_prev, col_info = st.columns([2, 1])
+    with col_prev:
+        if st.session_state.thumb_path and os.path.exists(st.session_state.thumb_path):
+            st.image(st.session_state.thumb_path, caption="🖼️ Anteprima frame", use_column_width=True)
+    
+    st.caption("▶️ Preview video (10s, 360p) — scarica per la versione completa")
     if st.session_state.prev_path and os.path.exists(st.session_state.prev_path):
         with open(st.session_state.prev_path, 'rb') as pf:
             st.video(pf.read())
