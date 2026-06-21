@@ -1034,32 +1034,26 @@ if uploaded_file is not None:
     use_keyframes = False
     if effect_type in ['vhs', 'distruttivo', 'noise', 'broken_tv']:
         st.markdown("---")
-        use_keyframes = st.toggle("⏱️ Animazione keyframe (Intensita')",
-            help="Definisci come cambia l'intensita' dell'effetto nel tempo. Aggiungi righe per ogni punto chiave.")
+        use_keyframes = st.toggle("⏱️ Animazione intensità nel tempo",
+            help="Interpola l'intensità dell'effetto dall'inizio alla fine del video.")
         if use_keyframes:
-            # Calcola durata stimata per precompilare i keyframe
+            col_kf1, col_kf2 = st.columns(2)
+            with col_kf1:
+                kf_start = st.slider("Intensità inizio", 0.0, 3.0, 0.5, 0.1, key="kf_start")
+            with col_kf2:
+                kf_end = st.slider("Intensità fine", 0.0, 3.0, 1.5, 0.1, key="kf_end")
+            # Costruisci kf_df sintetico per compatibilità con interpolate_keyframes
+            import pandas as pd
+            kf_df = pd.DataFrame({"Secondo": [0.0, 1.0], "Intensita'": [kf_start, kf_end]})
+            # I secondi vengono scalati in interpolate_keyframes tramite fps*frames,
+            # quindi usiamo 0.0 e 1.0 come frazioni normalizzate — aggiustiamo qui
+            # con la durata reale del video
             cap_tmp = cv2.VideoCapture(video_path)
             fps_tmp = cap_tmp.get(cv2.CAP_PROP_FPS) or 24
             frames_tmp = cap_tmp.get(cv2.CAP_PROP_FRAME_COUNT) or 0
             cap_tmp.release()
             dur_est = round(frames_tmp / fps_tmp, 1) if fps_tmp > 0 else 10.0
-            mid_est = round(dur_est / 2, 1)
-
-            import pandas as pd
-            default_kf = pd.DataFrame({
-                "Secondo": [0.0, mid_est, dur_est],
-                "Intensita'": [0.5, 1.5, 0.5]
-            })
-            st.caption(f"Durata stimata: {dur_est}s — modifica i valori o aggiungi righe")
-            kf_df = st.data_editor(
-                default_kf,
-                num_rows="dynamic",
-                use_container_width=True,
-                column_config={
-                    "Secondo":    st.column_config.NumberColumn("Secondo (s)", min_value=0.0, step=0.1, format="%.1f"),
-                    "Intensita'": st.column_config.NumberColumn("Intensita'",  min_value=0.0, max_value=3.0, step=0.1, format="%.1f"),
-                }
-            )
+            kf_df = pd.DataFrame({"Secondo": [0.0, dur_est], "Intensita'": [kf_start, kf_end]})
 
     # --- ANTEPRIMA ISTANTANEA (1 frame) ---
     if st.button("👁️ Anteprima effetto (1 frame)"):
