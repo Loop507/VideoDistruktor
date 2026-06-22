@@ -1367,6 +1367,8 @@ if 'orig_filename' not in st.session_state: st.session_state.orig_filename = ""
 if 'output_video_name' not in st.session_state: st.session_state.output_video_name = "glitch_output.mp4"
 if 'report_filename'   not in st.session_state: st.session_state.report_filename   = "report_glitch.txt"
 if 'use_audio_reactive' not in st.session_state: st.session_state.use_audio_reactive = False
+if 'glitched_audio_path' not in st.session_state: st.session_state.glitched_audio_path = ""
+if 'glitched_audio_name' not in st.session_state: st.session_state.glitched_audio_name = ""
 
 if uploaded_file is not None:
     # Controlla ffmpeg per l'audio
