@@ -851,43 +851,47 @@ def glitch_feedback_loop(frame, prev_frame, intensity=1.0, zoom=0.5, rotate=0.5)
         return frame
 
 def glitch_pixel_drift(frame, intensity=1.0, drift_speed=0.5, turbulence=0.5):
-    """Pixel drift: displacement map rumoroso che deforma ogni pixel in direzioni diverse — effetto liquid glitch."""
+    """Pixel drift: displacement map rumoroso — liquid glitch. Vettorizzato, safe remap."""
     try:
         arr = frame.copy()
         h, w = arr.shape[:2]
-        # mappa di displacement con Perlin-like noise (approssimato con filtro gaussiano su random)
-        mag = int(max(1, 20 * intensity))
-        noise_x = np.random.uniform(-1, 1, (h, w)).astype(np.float32)
-        noise_y = np.random.uniform(-1, 1, (h, w)).astype(np.float32)
-        ksize = max(3, int(51 - 40 * turbulence))
-        if ksize % 2 == 0: ksize += 1
-        smooth_x = cv2.GaussianBlur(noise_x, (ksize, ksize), 0) * mag
-        smooth_y = cv2.GaussianBlur(noise_y, (ksize, ksize), 0) * mag * drift_speed
-        # remap
-        map_x = (np.tile(np.arange(w, dtype=np.float32), (h, 1)) + smooth_x).astype(np.float32)
-        map_y = (np.tile(np.arange(h, dtype=np.float32).reshape(h, 1), (1, w)) + smooth_y).astype(np.float32)
-        map_x = np.clip(map_x, 0, w - 1)
-        map_y = np.clip(map_y, 0, h - 1)
-        return cv2.remap(arr, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        mag = max(1, int(20 * intensity))
+        noise_x = np.random.uniform(-1.0, 1.0, (h, w)).astype(np.float32)
+        noise_y = np.random.uniform(-1.0, 1.0, (h, w)).astype(np.float32)
+        ksize = max(3, int(51 - 40 * float(np.clip(turbulence, 0, 0.99))))
+        if ksize % 2 == 0:
+            ksize += 1
+        smooth_x = cv2.GaussianBlur(noise_x, (ksize, ksize), 0) * float(mag)
+        smooth_y = cv2.GaussianBlur(noise_y, (ksize, ksize), 0) * float(mag) * float(drift_speed)
+        base_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+        base_y = np.tile(np.arange(h, dtype=np.float32).reshape(h, 1), (1, w))
+        map_x = np.clip(base_x + smooth_x, 0, w - 1).astype(np.float32)
+        map_y = np.clip(base_y + smooth_y, 0, h - 1).astype(np.float32)
+        return cv2.remap(arr, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
     except Exception:
         return frame
 
 
 def glitch_slit_scan(frame, slit_buffer, intensity=1.0, speed=0.5, tilt=0.5):
-    """Slit Scan: ogni colonna del frame corrente viene presa da un momento temporale diverso del buffer.
-    Produce il warp temporale iconico di Trumbull / 2001."""
+    """Slit Scan: ogni colonna presa da un momento temporale diverso del buffer."""
     try:
         h, w = frame.shape[:2]
-        out = frame.copy()
         buf_len = len(slit_buffer)
         if buf_len < 2:
             return frame
+        out = frame.copy()
         for x in range(w):
-            # offset temporale per colonna, modulato da tilt e speed
-            t_offset = int((x / w) * buf_len * speed * intensity +
-                           np.sin(x / w * np.pi * tilt * 4) * buf_len * 0.1)
-            src_frame_idx = max(0, min(buf_len - 1, buf_len - 1 - t_offset % buf_len))
-            out[:, x] = slit_buffer[src_frame_idx][:, x % slit_buffer[src_frame_idx].shape[1]]
+            t_offset = int(
+                (float(x) / w) * buf_len * float(speed) * float(intensity) +
+                np.sin(float(x) / w * np.pi * float(tilt) * 4) * buf_len * 0.1
+            )
+            src_idx = int(buf_len - 1 - (abs(t_offset) % buf_len))
+            src_idx = max(0, min(buf_len - 1, src_idx))
+            src = slit_buffer[src_idx]
+            sh, sw = src.shape[:2]
+            sx = min(x, sw - 1)
+            col_h = min(h, sh)
+            out[:col_h, x] = src[:col_h, sx]
         return out
     except Exception:
         return frame
@@ -945,67 +949,63 @@ def glitch_ascii_glitch(frame, intensity=1.0, block_size=1.0, chaos=0.5):
         return frame
 
 def glitch_halftone(frame, intensity=1.0, dot_size=0.5, angle=0.3):
-    """Halftone Destroy: retino tipografico per canale con angoli sfasati — stampa offset esplosa."""
+    """Halftone Destroy: retino tipografico per canale con angoli sfasati — vettorizzato."""
     try:
         arr = frame.copy()
         h, w = arr.shape[:2]
         dsize = max(4, int(4 + 20 * dot_size))
-        angles = [angle * np.pi, angle * np.pi + 0.5, angle * np.pi + 1.0]
-        out = np.zeros_like(arr, dtype=np.float32)
-        for ch, theta in enumerate(angles):
+        out = np.zeros((h, w, 3), dtype=np.uint8)
+
+        for ch in range(3):
             ch_img = arr[:, :, ch].astype(np.float32) / 255.0
             ch_out = np.zeros((h, w), dtype=np.float32)
-            cos_t, sin_t = np.cos(theta), np.sin(theta)
-            for y in range(0, h, dsize):
-                for x in range(0, w, dsize):
-                    # centro del blocco
-                    cx, cy = x + dsize // 2, y + dsize // 2
-                    if cy >= h or cx >= w:
-                        continue
-                    lum = float(ch_img[min(cy,h-1), min(cx,w-1)])
+            # griglia di centri blocchi
+            ys = np.arange(dsize // 2, h, dsize)
+            xs = np.arange(dsize // 2, w, dsize)
+            for cy in ys:
+                for cx in xs:
+                    lum = float(ch_img[min(cy, h-1), min(cx, w-1)])
                     radius = int(lum * dsize / 2 * (1.0 + intensity * 0.5))
                     if radius > 0:
-                        # applica rotazione al centro del dot
-                        rx = int(cx * cos_t - cy * sin_t)
-                        ry = int(cx * sin_t + cy * cos_t)
-                        cv2.circle(ch_out, (min(max(cx,0),w-1), min(max(cy,0),h-1)),
-                                   min(radius, dsize), 1.0, -1)
-            out[:, :, ch] = np.clip(ch_out * 255, 0, 255)
-        # mischia con originale
+                        cv2.circle(ch_out, (int(cx), int(cy)), min(radius, dsize), 1.0, -1)
+            out[:, :, ch] = np.clip(ch_out * 255, 0, 255).astype(np.uint8)
+
         alpha = np.clip(0.5 + 0.4 * intensity, 0.5, 1.0)
-        return cv2.addWeighted(out, alpha, arr.astype(np.float32), 1.0 - alpha, 0).astype(np.uint8)
+        return cv2.addWeighted(out, alpha, arr, 1.0 - alpha, 0)
     except Exception:
         return frame
 
 def glitch_chroma_pulse(frame, intensity=1.0, radial=0.5, pulse_speed=0.5, _frame_idx=0):
-    """Chromatic Aberration Pulse: aberrazione cromatica radiale pulsante — ogni canale
-    si distorce verso l'esterno con ampiezza modulata nel tempo."""
+    """Chromatic Aberration Pulse: aberrazione cromatica radiale pulsante."""
     try:
         arr = frame.copy()
         h, w = arr.shape[:2]
-        cx, cy = w / 2, h / 2
-        # fase pulsante nel tempo
-        phase = _frame_idx * pulse_speed * 0.1
-        amp_r = int(intensity * 12 * (1.0 + 0.5 * np.sin(phase)))
-        amp_b = int(intensity * 12 * (1.0 + 0.5 * np.cos(phase + 1.0)))
+        cx, cy = float(w) / 2.0, float(h) / 2.0
+        phase = float(_frame_idx) * float(pulse_speed) * 0.1
+        amp_r = max(0, int(intensity * 12 * (1.0 + 0.5 * np.sin(phase))))
+        amp_b = max(0, int(intensity * 12 * (1.0 + 0.5 * np.cos(phase + 1.0))))
 
-        def radial_shift(ch_img, amp, cx, cy, radial_strength):
+        ys = np.arange(h, dtype=np.float32)
+        xs = np.arange(w, dtype=np.float32)
+        xx, yy = np.meshgrid(xs, ys)  # shape (h,w)
+        dx = xx - cx
+        dy = yy - cy
+        dist = np.sqrt(dx * dx + dy * dy) + 1e-8
+        base_x = xx  # float32 (h,w)
+        base_y = yy
+
+        def rshift(ch_img, amp):
             if amp == 0:
                 return ch_img
-            ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-            dx = xs - cx
-            dy = ys - cy
-            dist = np.sqrt(dx**2 + dy**2) + 1e-8
-            # shift radiale proporzionale alla distanza dal centro
-            shift_x = (dx / dist * amp * radial_strength).astype(np.float32)
-            shift_y = (dy / dist * amp * radial_strength * 0.5).astype(np.float32)
-            map_x = np.clip(xs + shift_x, 0, w - 1)
-            map_y = np.clip(ys + shift_y, 0, h - 1)
-            return cv2.remap(ch_img, map_x, map_y, cv2.INTER_LINEAR)
+            sh_x = (dx / dist * amp * float(radial)).astype(np.float32)
+            sh_y = (dy / dist * amp * float(radial) * 0.5).astype(np.float32)
+            mx = np.clip(base_x + sh_x, 0, w - 1).astype(np.float32)
+            my = np.clip(base_y + sh_y, 0, h - 1).astype(np.float32)
+            return cv2.remap(ch_img, mx, my, cv2.INTER_LINEAR)
 
         b, g, r = cv2.split(arr)
-        r = radial_shift(r, amp_r, cx, cy, radial)
-        b = radial_shift(b, amp_b, cx, cy, radial)
+        r = rshift(r, amp_r)
+        b = rshift(b, amp_b)
         return cv2.merge([b, g, r])
     except Exception:
         return frame
@@ -1891,7 +1891,7 @@ if uploaded_file is not None:
             else:
                 prev_frame = frame_live
             prev_rgb = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2RGB)
-            st.image(prev_rgb, use_column_width=True)
+            st.image(prev_rgb, use_container_width=True)
     except Exception as e:
         st.caption(f"Anteprima non disponibile: {e}")
 
