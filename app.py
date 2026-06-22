@@ -688,6 +688,67 @@ def glitch_color_quantize(frame, intensity=1.0, levels=1.0, dither=0.5):
         return frame
 
 
+def glitch_moire(frame, intensity=1.0, freq=1.0, angle=0.5):
+    """Moiré pattern: sovrappone griglie sinusoidali sfasate per canale — effetto interferenza ottica."""
+    try:
+        arr = frame.copy().astype(np.float32)
+        h, w = arr.shape[:2]
+        xs = np.linspace(0, freq * 2 * np.pi * w / 100, w, dtype=np.float32)
+        ys = np.linspace(0, freq * 2 * np.pi * h / 100, h, dtype=np.float32)
+        xx, yy = np.meshgrid(xs, ys)
+        # griglia rotata per canale
+        theta = angle * np.pi / 4
+        grid1 = np.sin(xx * np.cos(theta) + yy * np.sin(theta))
+        grid2 = np.sin(xx * np.cos(theta + 0.3) + yy * np.sin(theta + 0.3))
+        grid3 = np.sin(xx * np.cos(theta + 0.6) + yy * np.sin(theta + 0.6))
+        amp = intensity * 80
+        arr[:,:,0] = np.clip(arr[:,:,0] + grid1 * amp, 0, 255)
+        arr[:,:,1] = np.clip(arr[:,:,1] + grid2 * amp, 0, 255)
+        arr[:,:,2] = np.clip(arr[:,:,2] + grid3 * amp, 0, 255)
+        return arr.astype(np.uint8)
+    except Exception:
+        return frame
+
+def glitch_feedback_loop(frame, prev_frame, intensity=1.0, zoom=0.5, rotate=0.5):
+    """Video feedback loop: zoom + leggera rotazione del frame precedente sovrapposta al corrente — simula il loop di monitor su monitor."""
+    try:
+        if prev_frame is None:
+            return frame
+        h, w = frame.shape[:2]
+        scale = 1.0 + 0.05 * zoom * intensity
+        angle_deg = (rotate - 0.5) * 4 * intensity
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), angle_deg, scale)
+        warped = cv2.warpAffine(prev_frame, M, (w, h), borderMode=cv2.BORDER_WRAP)
+        alpha = np.clip(0.25 + 0.45 * intensity, 0.1, 0.85)
+        blended = cv2.addWeighted(frame.astype(np.float32), 1.0 - alpha,
+                                   warped.astype(np.float32), alpha, 0)
+        return np.clip(blended, 0, 255).astype(np.uint8)
+    except Exception:
+        return frame
+
+def glitch_pixel_drift(frame, intensity=1.0, drift_speed=0.5, turbulence=0.5):
+    """Pixel drift: displacement map rumoroso che deforma ogni pixel in direzioni diverse — effetto liquid glitch."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        # mappa di displacement con Perlin-like noise (approssimato con filtro gaussiano su random)
+        mag = int(max(1, 20 * intensity))
+        noise_x = np.random.uniform(-1, 1, (h, w)).astype(np.float32)
+        noise_y = np.random.uniform(-1, 1, (h, w)).astype(np.float32)
+        ksize = max(3, int(51 - 40 * turbulence))
+        if ksize % 2 == 0: ksize += 1
+        smooth_x = cv2.GaussianBlur(noise_x, (ksize, ksize), 0) * mag
+        smooth_y = cv2.GaussianBlur(noise_y, (ksize, ksize), 0) * mag * drift_speed
+        # remap
+        map_x = (np.tile(np.arange(w, dtype=np.float32), (h, 1)) + smooth_x).astype(np.float32)
+        map_y = (np.tile(np.arange(h, dtype=np.float32).reshape(h, 1), (1, w)) + smooth_y).astype(np.float32)
+        map_x = np.clip(map_x, 0, w - 1)
+        map_y = np.clip(map_y, 0, h - 1)
+        return cv2.remap(arr, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    except Exception:
+        return frame
+
+
 def interpolate_keyframes(keyframes_df, fps, total_frames):
     """Interpola i keyframe su tutti i frame del video. Ritorna array di valori."""
     import numpy as np
@@ -756,6 +817,9 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 'rgb_wave':      lambda f: glitch_rgb_wave(f, *cp),
                 'mirror_blocks': lambda f: glitch_mirror_blocks(f, *cp),
                 'color_quantize':lambda f: glitch_color_quantize(f, *cp),
+                'moire':         lambda f: glitch_moire(f, *cp),
+                'feedback_loop': lambda f: glitch_feedback_loop(f, prev_frame, *cp),
+                'pixel_drift':   lambda f: glitch_pixel_drift(f, *cp),
                 'vhs':           lambda f: glitch_vhs_frame(f, *cp),
                 'distruttivo':   lambda f: glitch_distruttivo_frame(f, *cp),
                 'noise':         lambda f: glitch_noise_frame(f, *cp),
@@ -775,7 +839,7 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 return cf
             elif effect_type == 'random':
                 rl = params[0] if params else 1.0
-                all_fx = ['pixel_sort','channel_shift','datamosh','byte_corrupt','slice_shift','echo_smear','rgb_wave','mirror_blocks','color_quantize','vhs','broken_tv','noise','distruttivo']
+                all_fx = ['pixel_sort','channel_shift','datamosh','byte_corrupt','slice_shift','echo_smear','rgb_wave','mirror_blocks','color_quantize','moire','feedback_loop','pixel_drift','vhs','broken_tv','noise','distruttivo']
                 ch = random.choice(all_fx)
                 rp = tuple(random.uniform(0.5, 1.5) * rl for _ in range(3))
                 if ch in ('datamosh','echo_smear'):
@@ -894,21 +958,31 @@ def get_crop_filter(w, h, aspect_ratio):
     return f"crop={new_w}:{new_h}:{x}:{y}"
 
 def recompress_h264(input_path, aspect_ratio="Originale"):
-    """Ricomprime il video in H.264 con ffmpeg per ridurre le dimensioni."""
+    """Ricomprime in H.264 CRF23 rispettando la risoluzione target esatta."""
     fd, output_path = tempfile.mkstemp(suffix='_h264.mp4')
     os.close(fd)
+    TARGET_SIZES = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
     try:
+        if aspect_ratio in TARGET_SIZES:
+            tw, th = TARGET_SIZES[aspect_ratio]
+            # scale con padding nero se necessario per avere esattamente le dimensioni target
+            vf = f"scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"
+        else:
+            # risoluzione originale, garantisce multipli di 2
+            vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
         cmd = [
             'ffmpeg', '-i', input_path,
             '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+            '-vf', vf,
             '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
             output_path, '-y'
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             return output_path
         else:
-            return input_path  # fallback all'originale
+            return input_path
     except Exception:
         return input_path
 
@@ -1006,7 +1080,8 @@ if 'video_ready' not in st.session_state: st.session_state.video_ready = False
 if 'h264_path'   not in st.session_state: st.session_state.h264_path   = ""
 if 'effect_name_saved' not in st.session_state: st.session_state.effect_name_saved = ""
 if 'orig_filename' not in st.session_state: st.session_state.orig_filename = ""
-if 'report_filename' not in st.session_state: st.session_state.report_filename = "report_glitch.txt"
+if 'output_video_name' not in st.session_state: st.session_state.output_video_name = "glitch_output.mp4"
+if 'report_filename'   not in st.session_state: st.session_state.report_filename   = "report_glitch.txt"
 
 if uploaded_file is not None:
     # Controlla ffmpeg per l'audio
@@ -1055,6 +1130,7 @@ if uploaded_file is not None:
         "🎭 Scegli l'effetto glitch:",
         ["pixel_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
          "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
+         "moire", "feedback_loop", "pixel_drift",
          "vhs", "broken_tv", "noise", "distruttivo", "combined", "random"],
         format_func=lambda x: {
             "pixel_sort":      "🔀 Pixel Sort",
@@ -1066,6 +1142,9 @@ if uploaded_file is not None:
             "rgb_wave":        "🌊 RGB Wave",
             "mirror_blocks":   "🪞 Mirror Blocks",
             "color_quantize":  "🎨 Color Quantize",
+            "moire":           "🕸️ Moiré Pattern",
+            "feedback_loop":   "🔁 Feedback Loop",
+            "pixel_drift":     "💧 Pixel Drift",
             "vhs":             "📼 VHS",
             "broken_tv":       "📻 Broken TV",
             "noise":           "📺 Noise",
@@ -1118,6 +1197,30 @@ if uploaded_file is not None:
         with col2: ss_num_slices = st.slider("Numero slice", 0.1, 3.0, 1.0, 0.1)
         with col3: ss_drift      = st.slider("Drift", 0.1, 3.0, 1.0, 0.1)
         params = (ss_intensity, ss_num_slices, ss_drift)
+
+    elif effect_type == 'moire':
+        st.subheader("🕸️ Moiré Pattern")
+        col1, col2, col3 = st.columns(3)
+        with col1: mo_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: mo_freq      = st.slider("Frequenza", 0.1, 5.0, 1.0, 0.1)
+        with col3: mo_angle     = st.slider("Angolo", 0.0, 1.0, 0.5, 0.05)
+        params = (mo_intensity, mo_freq, mo_angle)
+
+    elif effect_type == 'feedback_loop':
+        st.subheader("🔁 Feedback Loop")
+        col1, col2, col3 = st.columns(3)
+        with col1: fl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: fl_zoom      = st.slider("Zoom", 0.0, 1.0, 0.5, 0.05)
+        with col3: fl_rotate    = st.slider("Rotazione", 0.0, 1.0, 0.5, 0.05)
+        params = (fl_intensity, fl_zoom, fl_rotate)
+
+    elif effect_type == 'pixel_drift':
+        st.subheader("💧 Pixel Drift")
+        col1, col2, col3 = st.columns(3)
+        with col1: pd_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: pd_speed      = st.slider("Drift speed", 0.1, 3.0, 1.0, 0.1)
+        with col3: pd_turbulence = st.slider("Turbolenza", 0.0, 1.0, 0.5, 0.05)
+        params = (pd_intensity, pd_speed, pd_turbulence)
 
     elif effect_type == 'echo_smear':
         st.subheader("👻 Echo Smear")
@@ -1388,6 +1491,12 @@ if uploaded_file is not None:
                 prev_frame = glitch_byte_corrupt(frame_live, *params)
             elif effect_type == 'slice_shift':
                 prev_frame = glitch_slice_shift(frame_live, *params)
+            elif effect_type == 'moire':
+                prev_frame = glitch_moire(frame_live, *params)
+            elif effect_type == 'feedback_loop':
+                prev_frame = glitch_feedback_loop(frame_live, frame_live, *params)
+            elif effect_type == 'pixel_drift':
+                prev_frame = glitch_pixel_drift(frame_live, *params)
             elif effect_type == 'echo_smear':
                 prev_frame = glitch_echo_smear(frame_live, frame_live, *params)
             elif effect_type == 'rgb_wave':
@@ -1473,31 +1582,36 @@ if uploaded_file is not None:
                 if result_path:
                     st.success("✅ Video processato!")
                     with st.spinner("🗜️ H.264..."):
-                        h264_path = recompress_h264(result_path)
+                        h264_path = recompress_h264(result_path, aspect_ratio)
 
                     orig_size  = get_file_size_mb(video_path)
                     fps_v, w_v, h_v, frames_v, dur_v = get_video_info(video_path)
                     out_size   = get_file_size_mb(h264_path)
 
                     video_stem = os.path.splitext(uploaded_file.name)[0]
+                    effect_label = {
+                        "pixel_sort":"PixelSort","channel_shift":"ChannelShift",
+                        "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
+                        "slice_shift":"SliceShift","echo_smear":"EchoSmear",
+                        "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
+                        "color_quantize":"ColorQuantize","moire":"Moire",
+                        "feedback_loop":"FeedbackLoop","pixel_drift":"PixelDrift",
+                        "vhs":"VHS","distruttivo":"Distruttivo","noise":"Noise",
+                        "combined":"Combinato","broken_tv":"BrokenTV","random":"Random"
+                    }[effect_type]
+                    output_video_name = f"{video_stem}_{effect_label}.mp4"
+                    report_name       = f"{video_stem}_{effect_label}.txt"
+
                     st.session_state.report_data = build_report(
                         uploaded_file.name, orig_size, out_size,
                         fps_v, w_v, h_v, frames_v, dur_v,
                         effect_type, params, audio_mode != "0_originale", kf_df
                     )
-                    st.session_state.h264_path = h264_path
-                    st.session_state.effect_name_saved = {
-                        "pixel_sort":"PixelSort","channel_shift":"ChannelShift",
-                        "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
-                        "slice_shift":"SliceShift","echo_smear":"EchoSmear",
-                        "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
-                        "color_quantize":"ColorQuantize","vhs":"VHS",
-                        "distruttivo":"Distruttivo","noise":"Noise",
-                        "combined":"Combinato","broken_tv":"BrokenTV","random":"Random"
-                    }[effect_type]
-                    st.session_state.orig_filename = uploaded_file.name
-                    st.session_state.report_filename = f"report_{video_stem}.txt"
-                    st.session_state.video_ready = True
+                    st.session_state.h264_path         = h264_path
+                    st.session_state.output_video_name = output_video_name
+                    st.session_state.orig_filename     = uploaded_file.name
+                    st.session_state.report_filename   = report_name
+                    st.session_state.video_ready       = True
 
                     for p in [result_path, video_path]:
                         try: os.unlink(p)
@@ -1571,7 +1685,7 @@ if st.session_state.video_ready:
                 st.download_button(
                     label="📥 Scarica video (H.264)",
                     data=vf,
-                    file_name=f"glitched_{st.session_state.effect_name_saved}_{st.session_state.orig_filename}",
+                    file_name=st.session_state.output_video_name,
                     mime="video/mp4",
                     key="down_v"
                 )
