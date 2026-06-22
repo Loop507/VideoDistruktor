@@ -13,6 +13,130 @@ import librosa
 import soundfile as sf
 import time
 
+# ─────────────────────────────────────────────
+# AUDIO REACTIVE ANALYSIS
+# ─────────────────────────────────────────────
+
+def analyze_audio_for_video(audio_path, fps, total_frames):
+    """
+    Analizza l'audio e ritorna dizionario di envelope per-frame:
+      - rms       : energia globale (0-1)
+      - beats     : 1.0 sui beat, 0 altrove
+      - low_freq  : energia basse frequenze (0-1)
+      - high_freq : energia alte frequenze (0-1)
+      - spectral  : centroide spettrale normalizzato (0-1)
+    """
+    try:
+        y, sr = librosa.load(audio_path, sr=None, mono=True)
+        hop = max(1, int(sr / fps))
+
+        # RMS energy per frame
+        rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+        rms = rms / (rms.max() + 1e-8)
+
+        # Beat detection
+        tempo, beat_frames_raw = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop)
+        beats = np.zeros(len(rms), dtype=np.float32)
+        for b in beat_frames_raw:
+            if b < len(beats):
+                # gaussiana attorno al beat per 3 frame
+                for d in range(-2, 3):
+                    idx = b + d
+                    if 0 <= idx < len(beats):
+                        beats[idx] = max(beats[idx], np.exp(-0.5 * d**2))
+
+        # Spettrogramma per freq basse/alte
+        D = np.abs(librosa.stft(y, hop_length=hop))
+        freqs = librosa.fft_frequencies(sr=sr)
+        low_mask  = freqs < 250
+        high_mask = freqs > 4000
+
+        low_energy  = D[low_mask,  :].mean(axis=0)
+        high_energy = D[high_mask, :].mean(axis=0)
+        low_energy  = low_energy  / (low_energy.max()  + 1e-8)
+        high_energy = high_energy / (high_energy.max() + 1e-8)
+
+        # Centroide spettrale
+        centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop)[0]
+        centroid  = centroid / (centroid.max() + 1e-8)
+
+        def _pad(arr):
+            """Porta l'array esattamente a total_frames."""
+            if len(arr) >= total_frames:
+                return arr[:total_frames].astype(np.float32)
+            return np.pad(arr, (0, total_frames - len(arr)), mode='edge').astype(np.float32)
+
+        return {
+            'rms':      _pad(rms),
+            'beats':    _pad(beats),
+            'low_freq': _pad(low_energy),
+            'high_freq':_pad(high_energy),
+            'spectral': _pad(centroid),
+        }
+    except Exception as e:
+        # Fallback: tutti a 0.5
+        flat = np.full(total_frames, 0.5, dtype=np.float32)
+        return {'rms': flat, 'beats': np.zeros(total_frames, dtype=np.float32),
+                'low_freq': flat.copy(), 'high_freq': flat.copy(), 'spectral': flat.copy()}
+
+
+def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity=1.0):
+    """
+    Modifica params in base all'audio envelope del frame corrente.
+    Ritorna una nuova tupla params con valori modulati.
+    """
+    if audio_env is None or not isinstance(params, tuple):
+        return params
+
+    rms   = float(audio_env['rms'][frame_idx])
+    beat  = float(audio_env['beats'][frame_idx])
+    low   = float(audio_env['low_freq'][frame_idx])
+    high  = float(audio_env['high_freq'][frame_idx])
+    spec  = float(audio_env['spectral'][frame_idx])
+
+    p = list(params)
+    ar = ar_intensity
+
+    # Strategia per effetto: quale parametro è pilotato da cosa
+    STRATEGIES = {
+        'pixel_sort':    [('rms', 0), ('high_freq', 1)],   # intensità↑ con rms, soglia↑ con high
+        'channel_shift': [('rms', 0), ('beats', 1)],
+        'datamosh':      [('low_freq', 0), ('rms', 2)],     # blocchi grandi sui bassi, chaos su rms
+        'byte_corrupt':  [('rms', 0), ('beats', 1)],
+        'slice_shift':   [('rms', 0), ('spectral', 1)],
+        'echo_smear':    [('rms', 0), ('low_freq', 2)],
+        'rgb_wave':      [('spectral', 1), ('high_freq', 2)],
+        'mirror_blocks': [('beats', 0), ('rms', 1)],
+        'color_quantize':[('rms', 0), ('low_freq', 1)],
+        'moire':         [('rms', 0), ('spectral', 1)],
+        'feedback_loop': [('rms', 0), ('beats', 2)],
+        'pixel_drift':   [('low_freq', 0), ('rms', 1)],
+        'slit_scan':     [('rms', 0), ('spectral', 1)],
+        'thermal':       [('rms', 0), ('high_freq', 1)],
+        'ascii_glitch':  [('rms', 0), ('beats', 1)],
+        'halftone':      [('rms', 0), ('low_freq', 1)],
+        'chroma_pulse':  [('beats', 0), ('rms', 1)],
+        'vhs':           [('rms', 0), ('high_freq', 2)],
+        'distruttivo':   [('rms', 1), ('beats', 0)],
+        'noise':         [('rms', 0), ('high_freq', 1)],
+        'broken_tv':     [('rms', 0), ('beats', 2)],
+    }
+
+    sources = {'rms': rms, 'beats': beat, 'low_freq': low, 'high_freq': high, 'spectral': spec}
+    strategy = STRATEGIES.get(effect_type, [('rms', 0)])
+
+    for src_name, param_idx in strategy:
+        if param_idx < len(p):
+            base = p[param_idx]
+            mod  = sources[src_name] * ar * base
+            p[param_idx] = float(np.clip(base + mod, 0.01, 4.0))
+
+    # Beat flash: spike su parametro 0 sui beat
+    if beat > 0.5 and len(p) > 0:
+        p[0] = float(np.clip(p[0] * (1.0 + beat * ar), 0.01, 4.0))
+
+    return tuple(p)
+
 # Configurazione della pagina
 st.set_page_config(page_title="VideoDistruktor by loop507", layout="centered")
 
@@ -749,6 +873,144 @@ def glitch_pixel_drift(frame, intensity=1.0, drift_speed=0.5, turbulence=0.5):
         return frame
 
 
+def glitch_slit_scan(frame, slit_buffer, intensity=1.0, speed=0.5, tilt=0.5):
+    """Slit Scan: ogni colonna del frame corrente viene presa da un momento temporale diverso del buffer.
+    Produce il warp temporale iconico di Trumbull / 2001."""
+    try:
+        h, w = frame.shape[:2]
+        out = frame.copy()
+        buf_len = len(slit_buffer)
+        if buf_len < 2:
+            return frame
+        for x in range(w):
+            # offset temporale per colonna, modulato da tilt e speed
+            t_offset = int((x / w) * buf_len * speed * intensity +
+                           np.sin(x / w * np.pi * tilt * 4) * buf_len * 0.1)
+            src_frame_idx = max(0, min(buf_len - 1, buf_len - 1 - t_offset % buf_len))
+            out[:, x] = slit_buffer[src_frame_idx][:, x % slit_buffer[src_frame_idx].shape[1]]
+        return out
+    except Exception:
+        return frame
+
+def glitch_thermal(frame, intensity=1.0, noise_level=0.5, aberration=0.5):
+    """Thermal Vision Glitch: falsi colori termici (COLORMAP_JET) + aberrazione + noise sorveglianza."""
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        # boost contrasto termico
+        gray = np.clip(gray * (1.0 + 0.5 * intensity), 0, 255).astype(np.uint8)
+        # noise tipo sensore termico
+        if noise_level > 0:
+            noise = np.random.normal(0, noise_level * 15, gray.shape).astype(np.float32)
+            gray = np.clip(gray.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+        thermal = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+        # aberrazione cromatica sulle tre bande
+        if aberration > 0:
+            sh = int(aberration * 8 * intensity)
+            b, g, r = cv2.split(thermal)
+            r = np.roll(r,  sh, axis=1)
+            b = np.roll(b, -sh, axis=1)
+            thermal = cv2.merge([b, g, r])
+        # blend con originale in base a intensity
+        alpha = np.clip(0.4 + 0.5 * intensity, 0.4, 1.0)
+        return cv2.addWeighted(thermal.astype(np.float32), alpha,
+                               frame.astype(np.float32), 1.0 - alpha, 0).astype(np.uint8)
+    except Exception:
+        return frame
+
+def glitch_ascii_glitch(frame, intensity=1.0, block_size=1.0, chaos=0.5):
+    """ASCII Glitch: divide il frame in blocchi, sostituisce con la luminosità media come valore piatto,
+    poi corrompe blocchi casuali — estetica low-res distruttiva."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        bsize = max(4, int(8 + 24 * (1.0 - min(block_size, 0.99))))
+        for y in range(0, h, bsize):
+            for x in range(0, w, bsize):
+                block = arr[y:y+bsize, x:x+bsize]
+                if block.size == 0:
+                    continue
+                mean_val = block.mean(axis=(0, 1)).astype(np.uint8)
+                # quantizza il blocco alla media (ASCII-like flat)
+                arr[y:y+bsize, x:x+bsize] = mean_val
+                # chaos: corrompi blocchi casuali
+                if random.random() < chaos * intensity * 0.3:
+                    ch = random.randint(0, 2)
+                    arr[y:y+bsize, x:x+bsize, ch] = random.randint(0, 255)
+        # scanline nere (ogni N righe) per effetto CRT a bassa risoluzione
+        step = max(2, bsize)
+        if intensity > 0.5:
+            arr[::step] = (arr[::step].astype(np.float32) * (1.0 - 0.4 * intensity)).astype(np.uint8)
+        return arr
+    except Exception:
+        return frame
+
+def glitch_halftone(frame, intensity=1.0, dot_size=0.5, angle=0.3):
+    """Halftone Destroy: retino tipografico per canale con angoli sfasati — stampa offset esplosa."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        dsize = max(4, int(4 + 20 * dot_size))
+        angles = [angle * np.pi, angle * np.pi + 0.5, angle * np.pi + 1.0]
+        out = np.zeros_like(arr, dtype=np.float32)
+        for ch, theta in enumerate(angles):
+            ch_img = arr[:, :, ch].astype(np.float32) / 255.0
+            ch_out = np.zeros((h, w), dtype=np.float32)
+            cos_t, sin_t = np.cos(theta), np.sin(theta)
+            for y in range(0, h, dsize):
+                for x in range(0, w, dsize):
+                    # centro del blocco
+                    cx, cy = x + dsize // 2, y + dsize // 2
+                    if cy >= h or cx >= w:
+                        continue
+                    lum = float(ch_img[min(cy,h-1), min(cx,w-1)])
+                    radius = int(lum * dsize / 2 * (1.0 + intensity * 0.5))
+                    if radius > 0:
+                        # applica rotazione al centro del dot
+                        rx = int(cx * cos_t - cy * sin_t)
+                        ry = int(cx * sin_t + cy * cos_t)
+                        cv2.circle(ch_out, (min(max(cx,0),w-1), min(max(cy,0),h-1)),
+                                   min(radius, dsize), 1.0, -1)
+            out[:, :, ch] = np.clip(ch_out * 255, 0, 255)
+        # mischia con originale
+        alpha = np.clip(0.5 + 0.4 * intensity, 0.5, 1.0)
+        return cv2.addWeighted(out, alpha, arr.astype(np.float32), 1.0 - alpha, 0).astype(np.uint8)
+    except Exception:
+        return frame
+
+def glitch_chroma_pulse(frame, intensity=1.0, radial=0.5, pulse_speed=0.5, _frame_idx=0):
+    """Chromatic Aberration Pulse: aberrazione cromatica radiale pulsante — ogni canale
+    si distorce verso l'esterno con ampiezza modulata nel tempo."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        cx, cy = w / 2, h / 2
+        # fase pulsante nel tempo
+        phase = _frame_idx * pulse_speed * 0.1
+        amp_r = int(intensity * 12 * (1.0 + 0.5 * np.sin(phase)))
+        amp_b = int(intensity * 12 * (1.0 + 0.5 * np.cos(phase + 1.0)))
+
+        def radial_shift(ch_img, amp, cx, cy, radial_strength):
+            if amp == 0:
+                return ch_img
+            ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+            dx = xs - cx
+            dy = ys - cy
+            dist = np.sqrt(dx**2 + dy**2) + 1e-8
+            # shift radiale proporzionale alla distanza dal centro
+            shift_x = (dx / dist * amp * radial_strength).astype(np.float32)
+            shift_y = (dy / dist * amp * radial_strength * 0.5).astype(np.float32)
+            map_x = np.clip(xs + shift_x, 0, w - 1)
+            map_y = np.clip(ys + shift_y, 0, h - 1)
+            return cv2.remap(ch_img, map_x, map_y, cv2.INTER_LINEAR)
+
+        b, g, r = cv2.split(arr)
+        r = radial_shift(r, amp_r, cx, cy, radial)
+        b = radial_shift(b, amp_b, cx, cy, radial)
+        return cv2.merge([b, g, r])
+    except Exception:
+        return frame
+
+
 def interpolate_keyframes(keyframes_df, fps, total_frames):
     """Interpola i keyframe su tutti i frame del video. Ritorna array di valori."""
     import numpy as np
@@ -767,7 +1029,9 @@ def interpolate_keyframes(keyframes_df, fps, total_frames):
     except Exception:
         return None
 
-def process_video(video_path, effect_type, params, max_frames=None, audio_mode="0_originale", kf_envelope=None, audio_params_override=None, aspect_ratio="Originale", audio_source_path=None):
+def process_video(video_path, effect_type, params, max_frames=None, audio_mode="0_originale",
+                  kf_envelope=None, audio_params_override=None, aspect_ratio="Originale",
+                  audio_source_path=None, audio_env=None, ar_intensity=0.0):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         st.error("❌ Impossibile aprire il video.")
@@ -799,14 +1063,21 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
 
         frame_count = 0
         prev_frame  = None
+        slit_buffer = []
+        SLIT_BUF_LEN = 30
         progress_bar = st.progress(0)
         status_text  = st.empty()
 
-        def apply_effect(frame, prev_frame):
+        def apply_effect(frame, prev_frame, frame_count):
             cp = params
+            # keyframe
             if kf_envelope is not None and isinstance(params, tuple) and frame_count < len(kf_envelope):
                 kf_val = float(np.clip(kf_envelope[frame_count], 0.0, 3.0))
                 cp = (kf_val,) + params[1:]
+            # audio reactive
+            if audio_env is not None and ar_intensity > 0 and isinstance(cp, tuple):
+                cp = apply_audio_reactive(cp, effect_type, audio_env, frame_count, ar_intensity)
+
             fn_map = {
                 'pixel_sort':    lambda f: glitch_pixel_sort(f, *cp),
                 'channel_shift': lambda f: glitch_channel_shift(f, *cp),
@@ -820,6 +1091,11 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 'moire':         lambda f: glitch_moire(f, *cp),
                 'feedback_loop': lambda f: glitch_feedback_loop(f, prev_frame, *cp),
                 'pixel_drift':   lambda f: glitch_pixel_drift(f, *cp),
+                'slit_scan':     lambda f: glitch_slit_scan(f, slit_buffer, *cp),
+                'thermal':       lambda f: glitch_thermal(f, *cp),
+                'ascii_glitch':  lambda f: glitch_ascii_glitch(f, *cp),
+                'halftone':      lambda f: glitch_halftone(f, *cp),
+                'chroma_pulse':  lambda f: glitch_chroma_pulse(f, *cp, _frame_idx=frame_count),
                 'vhs':           lambda f: glitch_vhs_frame(f, *cp),
                 'distruttivo':   lambda f: glitch_distruttivo_frame(f, *cp),
                 'noise':         lambda f: glitch_noise_frame(f, *cp),
@@ -829,22 +1105,25 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 return fn_map[effect_type](frame)
             elif effect_type == 'combined':
                 cf = frame.copy()
-                if params.get("apply_vhs"):        cf = glitch_vhs_frame(cf, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
-                if params.get("apply_distruttivo"):cf = glitch_distruttivo_frame(cf, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
-                if params.get("apply_noise"):      cf = glitch_noise_frame(cf, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
-                if params.get("apply_broken_tv"):  cf = glitch_broken_tv_frame(cf, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
-                if params.get("apply_pixel_sort"): cf = glitch_pixel_sort(cf, params.get("ps_intensity",1.0), params.get("ps_threshold",0.5), params.get("ps_direction",0.3))
+                if params.get("apply_vhs"):         cf = glitch_vhs_frame(cf, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
+                if params.get("apply_distruttivo"): cf = glitch_distruttivo_frame(cf, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+                if params.get("apply_noise"):       cf = glitch_noise_frame(cf, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
+                if params.get("apply_broken_tv"):   cf = glitch_broken_tv_frame(cf, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
+                if params.get("apply_pixel_sort"):  cf = glitch_pixel_sort(cf, params.get("ps_intensity",1.0), params.get("ps_threshold",0.5), params.get("ps_direction",0.3))
                 if params.get("apply_channel_shift"):cf = glitch_channel_shift(cf, params.get("cs_intensity",1.0), params.get("cs_spread",1.0), params.get("cs_mode",0.3))
                 if params.get("apply_slice_shift"): cf = glitch_slice_shift(cf, params.get("ss_intensity",1.0), params.get("ss_num_slices",1.0), params.get("ss_drift",1.0))
                 return cf
             elif effect_type == 'random':
-                rl = params[0] if params else 1.0
-                all_fx = ['pixel_sort','channel_shift','datamosh','byte_corrupt','slice_shift','echo_smear','rgb_wave','mirror_blocks','color_quantize','moire','feedback_loop','pixel_drift','vhs','broken_tv','noise','distruttivo']
+                rl = cp[0] if cp else 1.0
+                all_fx = ['pixel_sort','channel_shift','datamosh','byte_corrupt','slice_shift',
+                          'echo_smear','rgb_wave','mirror_blocks','color_quantize','moire',
+                          'feedback_loop','pixel_drift','thermal','ascii_glitch','chroma_pulse',
+                          'vhs','broken_tv','noise','distruttivo']
                 ch = random.choice(all_fx)
                 rp = tuple(random.uniform(0.5, 1.5) * rl for _ in range(3))
-                if ch in ('datamosh','echo_smear'):
-                    return fn_map.get(ch, lambda f: f)(frame) if ch in fn_map else frame
-                return fn_map.get(ch, lambda f: glitch_noise_frame(f, *rp))(frame)
+                if ch in fn_map:
+                    return fn_map[ch](frame)
+                return glitch_noise_frame(frame, *rp)
             return frame
 
         while cap.isOpened() and frame_count < actual_total_frames:
@@ -852,9 +1131,14 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
             if not ret:
                 break
             try:
-                processed = apply_effect(frame, prev_frame)
+                processed = apply_effect(frame, prev_frame, frame_count)
             except Exception:
                 processed = frame
+
+            # aggiorna slit buffer
+            slit_buffer.append(frame.copy())
+            if len(slit_buffer) > SLIT_BUF_LEN:
+                slit_buffer.pop(0)
 
             prev_frame = frame.copy()
 
@@ -1082,6 +1366,7 @@ if 'effect_name_saved' not in st.session_state: st.session_state.effect_name_sav
 if 'orig_filename' not in st.session_state: st.session_state.orig_filename = ""
 if 'output_video_name' not in st.session_state: st.session_state.output_video_name = "glitch_output.mp4"
 if 'report_filename'   not in st.session_state: st.session_state.report_filename   = "report_glitch.txt"
+if 'use_audio_reactive' not in st.session_state: st.session_state.use_audio_reactive = False
 
 if uploaded_file is not None:
     # Controlla ffmpeg per l'audio
@@ -1131,26 +1416,32 @@ if uploaded_file is not None:
         ["pixel_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
          "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
          "moire", "feedback_loop", "pixel_drift",
+         "slit_scan", "thermal", "ascii_glitch", "halftone", "chroma_pulse",
          "vhs", "broken_tv", "noise", "distruttivo", "combined", "random"],
         format_func=lambda x: {
-            "pixel_sort":      "🔀 Pixel Sort",
-            "channel_shift":   "🌈 Channel Shift",
-            "datamosh":        "💾 Datamosh",
-            "byte_corrupt":    "🦠 Byte Corrupt",
-            "slice_shift":     "✂️ Slice Shift",
-            "echo_smear":      "👻 Echo Smear",
-            "rgb_wave":        "🌊 RGB Wave",
-            "mirror_blocks":   "🪞 Mirror Blocks",
-            "color_quantize":  "🎨 Color Quantize",
-            "moire":           "🕸️ Moiré Pattern",
-            "feedback_loop":   "🔁 Feedback Loop",
-            "pixel_drift":     "💧 Pixel Drift",
-            "vhs":             "📼 VHS",
-            "broken_tv":       "📻 Broken TV",
-            "noise":           "📺 Noise",
-            "distruttivo":     "💥 Distruttivo",
-            "combined":        "🌟 Combinato",
-            "random":          "🎲 Random"
+            "pixel_sort":    "🔀 Pixel Sort",
+            "channel_shift": "🌈 Channel Shift",
+            "datamosh":      "💾 Datamosh",
+            "byte_corrupt":  "🦠 Byte Corrupt",
+            "slice_shift":   "✂️ Slice Shift",
+            "echo_smear":    "👻 Echo Smear",
+            "rgb_wave":      "🌊 RGB Wave",
+            "mirror_blocks": "🪞 Mirror Blocks",
+            "color_quantize":"🎨 Color Quantize",
+            "moire":         "🕸️ Moiré Pattern",
+            "feedback_loop": "🔁 Feedback Loop",
+            "pixel_drift":   "💧 Pixel Drift",
+            "slit_scan":     "📷 Slit Scan",
+            "thermal":       "🌡️ Thermal Vision",
+            "ascii_glitch":  "⌨️ ASCII Glitch",
+            "halftone":      "🔵 Halftone Destroy",
+            "chroma_pulse":  "💥 Chroma Pulse",
+            "vhs":           "📼 VHS",
+            "broken_tv":     "📻 Broken TV",
+            "noise":         "📺 Noise",
+            "distruttivo":   "💥 Distruttivo",
+            "combined":      "🌟 Combinato",
+            "random":        "🎲 Random"
         }[x]
     )
 
@@ -1197,6 +1488,46 @@ if uploaded_file is not None:
         with col2: ss_num_slices = st.slider("Numero slice", 0.1, 3.0, 1.0, 0.1)
         with col3: ss_drift      = st.slider("Drift", 0.1, 3.0, 1.0, 0.1)
         params = (ss_intensity, ss_num_slices, ss_drift)
+
+    elif effect_type == 'slit_scan':
+        st.subheader("📷 Slit Scan")
+        col1, col2, col3 = st.columns(3)
+        with col1: sl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: sl_speed     = st.slider("Speed", 0.1, 3.0, 1.0, 0.1)
+        with col3: sl_tilt      = st.slider("Tilt", 0.0, 1.0, 0.5, 0.05)
+        params = (sl_intensity, sl_speed, sl_tilt)
+
+    elif effect_type == 'thermal':
+        st.subheader("🌡️ Thermal Vision")
+        col1, col2, col3 = st.columns(3)
+        with col1: th_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: th_noise      = st.slider("Noise sensore", 0.0, 1.0, 0.5, 0.05)
+        with col3: th_aberration = st.slider("Aberrazione", 0.0, 1.0, 0.5, 0.05)
+        params = (th_intensity, th_noise, th_aberration)
+
+    elif effect_type == 'ascii_glitch':
+        st.subheader("⌨️ ASCII Glitch")
+        col1, col2, col3 = st.columns(3)
+        with col1: ag_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: ag_block_size = st.slider("Block size", 0.1, 1.0, 0.5, 0.05)
+        with col3: ag_chaos      = st.slider("Chaos", 0.0, 1.0, 0.5, 0.05)
+        params = (ag_intensity, ag_block_size, ag_chaos)
+
+    elif effect_type == 'halftone':
+        st.subheader("🔵 Halftone Destroy")
+        col1, col2, col3 = st.columns(3)
+        with col1: ht_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: ht_dot_size  = st.slider("Dot size", 0.1, 1.0, 0.5, 0.05)
+        with col3: ht_angle     = st.slider("Angolo", 0.0, 1.0, 0.3, 0.05)
+        params = (ht_intensity, ht_dot_size, ht_angle)
+
+    elif effect_type == 'chroma_pulse':
+        st.subheader("💥 Chroma Pulse")
+        col1, col2, col3 = st.columns(3)
+        with col1: cp_intensity   = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+        with col2: cp_radial      = st.slider("Radiale", 0.0, 1.0, 0.5, 0.05)
+        with col3: cp_pulse_speed = st.slider("Pulse speed", 0.1, 3.0, 1.0, 0.1)
+        params = (cp_intensity, cp_radial, cp_pulse_speed)
 
     elif effect_type == 'moire':
         st.subheader("🕸️ Moiré Pattern")
@@ -1449,6 +1780,16 @@ if uploaded_file is not None:
     # Limita frame per video lunghi
     max_frames = st.number_input("🎬 Limite frame (0 = nessun limite)", min_value=0, max_value=10000, value=0)
 
+    # --- AUDIO REACTIVE ---
+    st.markdown("---")
+    st.subheader("🎵 Audio Reactive")
+    use_audio_reactive = st.toggle("🎚️ Effetto pilotato dall'audio",
+        help="Analizza l'audio (RMS, beat, freq basse/alte) e modula i parametri frame per frame.")
+    ar_intensity = 0.0
+    if use_audio_reactive:
+        ar_intensity = st.slider("Intensità reattività", 0.1, 3.0, 1.0, 0.1, key="ar_intensity")
+        st.caption("🔵 RMS → intensità globale  |  🟠 Beat → flash  |  🟣 Basse → param 1  |  🟡 Alte → param 2")
+
     # KEYFRAME — solo per effetti singoli (non combined/random)
     kf_df = None
     use_keyframes = False
@@ -1491,6 +1832,16 @@ if uploaded_file is not None:
                 prev_frame = glitch_byte_corrupt(frame_live, *params)
             elif effect_type == 'slice_shift':
                 prev_frame = glitch_slice_shift(frame_live, *params)
+            elif effect_type == 'slit_scan':
+                prev_frame = glitch_slit_scan(frame_live, [frame_live], *params)
+            elif effect_type == 'thermal':
+                prev_frame = glitch_thermal(frame_live, *params)
+            elif effect_type == 'ascii_glitch':
+                prev_frame = glitch_ascii_glitch(frame_live, *params)
+            elif effect_type == 'halftone':
+                prev_frame = glitch_halftone(frame_live, *params)
+            elif effect_type == 'chroma_pulse':
+                prev_frame = glitch_chroma_pulse(frame_live, *params, _frame_idx=0)
             elif effect_type == 'moire':
                 prev_frame = glitch_moire(frame_live, *params)
             elif effect_type == 'feedback_loop':
@@ -1568,6 +1919,21 @@ if uploaded_file is not None:
                         frames_info = min(frames_info, max_frames)
                     kf_envelope = interpolate_keyframes(kf_df, fps_info, frames_info)
 
+                # Analisi audio per audio-reactive
+                audio_env = None
+                if use_audio_reactive:
+                    with st.spinner("🎵 Analisi audio..."):
+                        # estrai audio temp per analisi
+                        _tmp_wav = extract_audio(video_path)
+                        if _tmp_wav:
+                            cap_ar = cv2.VideoCapture(video_path)
+                            _fps_ar = cap_ar.get(cv2.CAP_PROP_FPS) or 24
+                            _tot_ar = int(cap_ar.get(cv2.CAP_PROP_FRAME_COUNT))
+                            cap_ar.release()
+                            audio_env = analyze_audio_for_video(_tmp_wav, _fps_ar, _tot_ar)
+                            try: os.unlink(_tmp_wav)
+                            except: pass
+
                 # Gestione audio source per modalità 1_carica
                 audio_source_path = None
                 if audio_mode == "1_carica" and uploaded_audio_inline is not None:
@@ -1577,7 +1943,10 @@ if uploaded_file is not None:
                     with open(audio_source_path, 'wb') as f:
                         f.write(uploaded_audio_inline.read())
 
-                result_path = process_video(video_path, effect_type, params, max_frames, audio_mode, kf_envelope, audio_params_override, aspect_ratio, audio_source_path)
+                result_path = process_video(video_path, effect_type, params, max_frames,
+                                            audio_mode, kf_envelope, audio_params_override,
+                                            aspect_ratio, audio_source_path,
+                                            audio_env, ar_intensity)
                 
                 if result_path:
                     st.success("✅ Video processato!")
@@ -1596,6 +1965,9 @@ if uploaded_file is not None:
                         "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
                         "color_quantize":"ColorQuantize","moire":"Moire",
                         "feedback_loop":"FeedbackLoop","pixel_drift":"PixelDrift",
+                        "slit_scan":"SlitScan","thermal":"Thermal",
+                        "ascii_glitch":"AsciiGlitch","halftone":"Halftone",
+                        "chroma_pulse":"ChromaPulse",
                         "vhs":"VHS","distruttivo":"Distruttivo","noise":"Noise",
                         "combined":"Combinato","broken_tv":"BrokenTV","random":"Random"
                     }[effect_type]
