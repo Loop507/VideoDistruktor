@@ -349,6 +349,7 @@ def glitch_audio_broken_tv(audio, sr, static_intensity=1.0, channel_separation=1
 def process_audio_glitch(audio_path, effect_type, params):
     """Processa l'audio con l'effetto scelto"""
     try:
+        import librosa  # lazy import — evita segfault numba
         # Carica l'audio
         audio, sr = librosa.load(audio_path, sr=None, mono=False)
         
@@ -1189,7 +1190,13 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 raw_audio = extract_audio(video_path)
 
             if raw_audio:
-                a_eff = effect_type if effect_type not in ['pixel_sort','channel_shift','datamosh','byte_corrupt','slice_shift','echo_smear','rgb_wave','mirror_blocks','color_quantize'] else 'noise'
+                # effetti video-only usano 'noise' per l'audio (nessun corrispondente audio nativo)
+                VIDEO_ONLY_FX = {'pixel_sort','channel_shift','datamosh','byte_corrupt',
+                                 'slice_shift','echo_smear','rgb_wave','mirror_blocks',
+                                 'color_quantize','moire','feedback_loop','pixel_drift',
+                                 'slit_scan','thermal','ascii_glitch','halftone',
+                                 'chroma_pulse'}
+                a_eff = 'noise' if effect_type in VIDEO_ONLY_FX else effect_type
                 a_params = audio_params_override if audio_params_override is not None else (1.0, 1.0, 1.0)
                 glitched_audio = process_audio_glitch(raw_audio, a_eff, a_params)
                 audio_to_use = glitched_audio if glitched_audio else raw_audio
@@ -1204,7 +1211,7 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                            '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
                            '-shortest', final_output_path, '-y']
                 subprocess.run(cmd, capture_output=True)
-                for p in [temp_video_path, raw_audio, glitched_audio or '']:
+                for p in [temp_video_path, raw_audio] + ([glitched_audio] if glitched_audio else []):
                     try: os.unlink(p)
                     except: pass
                 return final_output_path
