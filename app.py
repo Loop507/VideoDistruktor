@@ -1,7 +1,11 @@
+import os
+# Disabilita JIT numba — previene segfault su Streamlit Cloud
+os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+
 import streamlit as st
 import numpy as np
 import tempfile
-import os
 from PIL import Image
 import random
 import cv2
@@ -9,9 +13,9 @@ import subprocess
 import shutil
 from scipy.io import wavfile
 from scipy import signal
-import librosa
 import soundfile as sf
 import time
+# librosa importato lazy in analyze_audio_for_video() per evitare segfault da numba JIT
 
 # ─────────────────────────────────────────────
 # AUDIO REACTIVE ANALYSIS
@@ -27,6 +31,7 @@ def analyze_audio_for_video(audio_path, fps, total_frames):
       - spectral  : centroide spettrale normalizzato (0-1)
     """
     try:
+        import librosa  # import lazy: evita segfault numba al bootstrap
         y, sr = librosa.load(audio_path, sr=None, mono=True)
         hop = max(1, int(sr / fps))
 
