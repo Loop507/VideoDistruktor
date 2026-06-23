@@ -42,10 +42,15 @@ def analyze_audio_for_video(audio_path, fps, total_frames):
         # Beat detection — compatibile librosa >= 0.10 (ritorna BeatTrackResult, non tupla)
         _beat_result = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop)
         beat_frames_raw = _beat_result[1] if isinstance(_beat_result, tuple) else _beat_result.beat_frames
+        # beat_frames_exact: indici frame video esatti (non hop-frame, ma video-frame)
+        beat_frames_exact = np.unique(np.clip(
+            np.round(beat_frames_raw.astype(np.float32) * hop / (sr / fps)).astype(np.int32),
+            0, total_frames - 1
+        ))
         beats = np.zeros(len(rms), dtype=np.float32)
         for b in beat_frames_raw:
             if b < len(beats):
-                # gaussiana attorno al beat per 3 frame
+                # gaussiana attorno al beat per 3 frame (usata solo in modalità non-sync)
                 for d in range(-2, 3):
                     idx = b + d
                     if 0 <= idx < len(beats):
@@ -73,17 +78,19 @@ def analyze_audio_for_video(audio_path, fps, total_frames):
             return np.pad(arr, (0, total_frames - len(arr)), mode='edge').astype(np.float32)
 
         return {
-            'rms':      _pad(rms),
-            'beats':    _pad(beats),
-            'low_freq': _pad(low_energy),
-            'high_freq':_pad(high_energy),
-            'spectral': _pad(centroid),
+            'rms':               _pad(rms),
+            'beats':             _pad(beats),
+            'low_freq':          _pad(low_energy),
+            'high_freq':         _pad(high_energy),
+            'spectral':          _pad(centroid),
+            'beat_frames_exact': beat_frames_exact,  # array di frame-index video esatti
         }
     except Exception as e:
         # Fallback silenzioso: tutti a 0.5 — l'errore non è critico
         flat = np.full(total_frames, 0.5, dtype=np.float32)
         return {'rms': flat, 'beats': np.zeros(total_frames, dtype=np.float32),
-                'low_freq': flat.copy(), 'high_freq': flat.copy(), 'spectral': flat.copy()}
+                'low_freq': flat.copy(), 'high_freq': flat.copy(), 'spectral': flat.copy(),
+                'beat_frames_exact': np.array([], dtype=np.int32)}
 
 
 def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity=1.0):
@@ -142,6 +149,30 @@ def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity
         p[0] = float(np.clip(p[0] * (1.0 + beat * ar), 0.01, 4.0))
 
     return tuple(p)
+
+def build_beat_envelope(beat_frames_exact, total_frames, decay_frames=6, peak=1.0):
+    """
+    Costruisce un envelope float32 (total_frames,) con:
+    - picco = peak sui beat esatti
+    - decadimento esponenziale: val = peak * exp(-distanza / decay_frames)
+    - 0 lontano dai beat
+    decay_frames: numero di frame per scendere a ~37% del picco (costante di tempo)
+    """
+    env = np.zeros(total_frames, dtype=np.float32)
+    if len(beat_frames_exact) == 0:
+        return env
+    for bf in beat_frames_exact:
+        bf = int(bf)
+        # decadimento verso destra (post-beat)
+        for d in range(min(decay_frames * 4, total_frames)):
+            idx = bf + d
+            if idx >= total_frames:
+                break
+            val = peak * np.exp(-d / max(1, decay_frames))
+            if val > env[idx]:
+                env[idx] = val
+    return env
+
 
 # Configurazione della pagina
 st.set_page_config(page_title="VideoDistruktor by loop507", layout="wide")
@@ -1110,7 +1141,8 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                   kf_envelope=None, audio_params_override=None, aspect_ratio="Originale",
                   audio_source_path=None, audio_env=None, ar_intensity=0.0,
                   mask_type="nessuna", mask_x=0.5, mask_y=0.5, mask_w=1.0, mask_h=0.3,
-                  mask_feather=0, mask_reverse=False):
+                  mask_feather=0, mask_reverse=False,
+                  beat_sync=False, beat_decay=6, beat_intensity=2.0):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         st.error("❌ Impossibile aprire il video.")
@@ -1151,14 +1183,28 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
         glitch_mask = build_mask(out_h, out_w, mask_type, mask_x, mask_y,
                                  mask_w, mask_h, mask_feather, mask_reverse)
 
+        # Beat-sync envelope (solo se attivo e audio_env disponibile)
+        beat_env = None
+        if beat_sync and audio_env is not None:
+            bfe = audio_env.get('beat_frames_exact', np.array([], dtype=np.int32))
+            beat_env = build_beat_envelope(bfe, actual_total_frames,
+                                           decay_frames=beat_decay, peak=beat_intensity)
+
         def apply_effect(frame, prev_frame, frame_count):
             cp = params
             # keyframe
             if kf_envelope is not None and isinstance(params, tuple) and frame_count < len(kf_envelope):
                 kf_val = float(np.clip(kf_envelope[frame_count], 0.0, 3.0))
                 cp = (kf_val,) + params[1:]
-            # audio reactive
-            if audio_env is not None and ar_intensity > 0 and isinstance(cp, tuple):
+            # beat-sync: sovrascrive il param 0 con l'envelope beat esatto
+            if beat_env is not None and frame_count < len(beat_env):
+                bval = float(beat_env[frame_count])
+                if isinstance(cp, tuple) and len(cp) > 0:
+                    cp = (float(np.clip(bval, 0.01, 4.0)),) + cp[1:]
+                elif isinstance(cp, tuple):
+                    cp = (float(np.clip(bval, 0.01, 4.0)),)
+            # audio reactive (solo se beat_sync non attivo)
+            elif audio_env is not None and ar_intensity > 0 and isinstance(cp, tuple):
                 cp = apply_audio_reactive(cp, effect_type, audio_env, frame_count, ar_intensity)
 
             fn_map = {
@@ -1760,6 +1806,20 @@ if uploaded_file is not None:
         if use_audio_reactive:
             ar_intensity = st.slider("Intensità reattività", 0.1, 3.0, 1.0, 0.1, key="ar_intensity")
 
+        # ── BEAT SYNC ────────────────────────────────────────────
+        beat_sync = st.toggle("🥁 Beat Sync",
+            help="L'effetto scatta esattamente sui beat rilevati, con decadimento esponenziale.")
+        beat_decay   = 6
+        beat_intensity = 2.0
+        if beat_sync:
+            use_audio_reactive = False  # i due modi si escludono
+            bs1, bs2 = st.columns(2)
+            with bs1:
+                beat_intensity = st.slider("Intensità picco", 0.5, 4.0, 2.0, 0.1, key="bs_intensity")
+            with bs2:
+                beat_decay = st.slider("Decay (frame)", 1, 30, 6, 1, key="bs_decay",
+                    help="Frame per tornare al 37% del picco. 6@24fps = ~250ms")
+
         # ── KEYFRAME ─────────────────────────────────────────────
         kf_df = None
         use_keyframes = False
@@ -1922,9 +1982,9 @@ if uploaded_file is not None:
                     frames_info = min(frames_info, max_frames)
                 kf_envelope = interpolate_keyframes(kf_df, fps_info, frames_info)
 
-            # Analisi audio reactive
+            # Analisi audio (serve sia per audio_reactive che per beat_sync)
             audio_env = None
-            if use_audio_reactive:
+            if use_audio_reactive or beat_sync:
                 with st.spinner("🎵 Analisi audio..."):
                     _tmp_wav = extract_audio(video_path, silent=True)
                     if _tmp_wav:
@@ -1935,6 +1995,8 @@ if uploaded_file is not None:
                         audio_env = analyze_audio_for_video(_tmp_wav, _fps_ar, _tot_ar)
                         try: os.unlink(_tmp_wav)
                         except: pass
+                    else:
+                        st.warning("⚠️ Nessuna traccia audio trovata nel video — Beat Sync disabilitato.")
 
             # Gestione sorgente audio esterna
             audio_source_path = None
@@ -1960,7 +2022,8 @@ if uploaded_file is not None:
                                         aspect_ratio, audio_source_path,
                                         audio_env, ar_intensity,
                                         mask_type, mask_x, mask_y, mask_w, mask_h,
-                                        mask_feather, mask_reverse)
+                                        mask_feather, mask_reverse,
+                                        beat_sync, beat_decay, beat_intensity)
 
             if result_path:
                 st.success("✅ Video processato!")
