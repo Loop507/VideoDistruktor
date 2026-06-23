@@ -39,8 +39,9 @@ def analyze_audio_for_video(audio_path, fps, total_frames):
         rms = librosa.feature.rms(y=y, hop_length=hop)[0]
         rms = rms / (rms.max() + 1e-8)
 
-        # Beat detection
-        tempo, beat_frames_raw = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop)
+        # Beat detection — compatibile con librosa >= 0.10 (ritorna BeatTrackResult)
+        _beat_result = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop)
+        beat_frames_raw = _beat_result[1] if isinstance(_beat_result, tuple) else _beat_result.beat_frames
         beats = np.zeros(len(rms), dtype=np.float32)
         for b in beat_frames_raw:
             if b < len(beats):
