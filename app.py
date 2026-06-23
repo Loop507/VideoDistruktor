@@ -39,7 +39,7 @@ def analyze_audio_for_video(audio_path, fps, total_frames):
         rms = librosa.feature.rms(y=y, hop_length=hop)[0]
         rms = rms / (rms.max() + 1e-8)
 
-        # Beat detection — compatibile con librosa >= 0.10 (ritorna BeatTrackResult)
+        # Beat detection — compatibile librosa >= 0.10 (ritorna BeatTrackResult, non tupla)
         _beat_result = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop)
         beat_frames_raw = _beat_result[1] if isinstance(_beat_result, tuple) else _beat_result.beat_frames
         beats = np.zeros(len(rms), dtype=np.float32)
@@ -144,14 +144,13 @@ def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity
     return tuple(p)
 
 # Configurazione della pagina
-st.set_page_config(page_title="VideoDistruktor by loop507", layout="centered")
+st.set_page_config(page_title="VideoDistruktor by loop507", layout="wide")
 
-# Modifica del titolo con caratteri più piccoli per "by loop507"
 st.markdown("<h1>🎬🔥 VideoDistruktor <span style='font-size:0.5em;'>by loop507</span></h1>", unsafe_allow_html=True)
-st.write("Carica un video e genera versioni glitchate: VHS, Distruttivo, Noise, Combinato, Broken TV o Random! **Audio glitch su video e file audio separati (mp3/wav/aac)!**")
+st.write("Carica un video e distruggi: VHS, Distruttivo, Noise, Combinato, Broken TV e molto altro. **Audio reactive, keyframe, glitch audio su 4 modalità.**")
 
-# File uploader per audio separato (opzionale)
-uploaded_audio_file = st.file_uploader("🎵 Carica audio separato da glitchare (opzionale — mp3/wav/aac)", type=["mp3", "wav", "aac", "ogg", "flac", "m4a"])
+# File uploader per video — unico punto di ingresso
+uploaded_file = st.file_uploader("📁 Carica un video", type=["mp4", "avi", "mov", "mkv"])
 
 # Controlla se ffmpeg è disponibile (cached per evitare subprocess ad ogni re-run)
 @st.cache_data
@@ -161,9 +160,6 @@ def check_ffmpeg():
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
-
-# File uploader per video
-uploaded_file = st.file_uploader("📁 Carica un video", type=["mp4", "avi", "mov", "mkv"])
 
 def frame_to_pil(frame):
     """Converte frame OpenCV (BGR) in PIL Image (RGB)"""
@@ -1390,684 +1386,511 @@ if 'use_audio_reactive' not in st.session_state: st.session_state.use_audio_reac
 if 'glitched_audio_path' not in st.session_state: st.session_state.glitched_audio_path = ""
 if 'glitched_audio_name' not in st.session_state: st.session_state.glitched_audio_name = ""
 
+
 if uploaded_file is not None:
-    # Controlla ffmpeg per l'audio
     ffmpeg_available = check_ffmpeg()
     if not ffmpeg_available:
-        st.warning("⚠️ FFmpeg non è disponibile. Gli effetti audio saranno disabilitati. Solo gli effetti video funzioneranno.")
-    
-    # Opzioni audio
-    # --- MODALITÀ AUDIO ---
-    st.markdown("---")
-    st.subheader("🎵 Audio")
-    if not ffmpeg_available:
-        st.warning("⚠️ FFmpeg non disponibile — audio disabilitato.")
-        audio_mode = "0_originale"
-    else:
-        audio_mode = st.radio(
-            "Modalità audio:",
-            ["0_originale", "1_carica", "2_distruggi", "3_solo_effetto"],
-            format_func=lambda x: {
-                "0_originale":   "🔇 Audio originale (nessuna modifica)",
-                "1_carica":      "🎵 Carica brano esterno e distruggi",
-                "2_distruggi":   "💥 Distruggi audio del video",
-                "3_solo_effetto":"🔊 Solo effetto audio (rimuovi originale)",
-            }[x],
-            horizontal=False,
-            key="audio_mode_radio"
-        )
+        st.warning("⚠️ FFmpeg non disponibile — effetti audio disabilitati.")
 
-    uploaded_audio_inline = None
-    if audio_mode == "1_carica":
-        uploaded_audio_inline = st.file_uploader(
-            "📂 Carica brano (mp3/wav/aac/ogg/flac/m4a)",
-            type=["mp3","wav","aac","ogg","flac","m4a"],
-            key="audio_inline_uploader"
-        )
-
-    include_audio = audio_mode != "0_originale" and ffmpeg_available
-
-    # Salva il file caricato
+    # Salva il file video in temp
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
         tmp_file.write(uploaded_file.read())
         video_path = tmp_file.name
 
-    # Selettore dell'effetto
-    effect_type = st.selectbox(
-        "🎭 Scegli l'effetto glitch:",
-        ["pixel_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
-         "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
-         "moire", "feedback_loop", "pixel_drift",
-         "slit_scan", "thermal", "ascii_glitch", "halftone", "chroma_pulse",
-         "vhs", "broken_tv", "noise", "distruttivo", "combined", "random"],
-        format_func=lambda x: {
-            "pixel_sort":    "🔀 Pixel Sort",
-            "channel_shift": "🌈 Channel Shift",
-            "datamosh":      "💾 Datamosh",
-            "byte_corrupt":  "🦠 Byte Corrupt",
-            "slice_shift":   "✂️ Slice Shift",
-            "echo_smear":    "👻 Echo Smear",
-            "rgb_wave":      "🌊 RGB Wave",
-            "mirror_blocks": "🪞 Mirror Blocks",
-            "color_quantize":"🎨 Color Quantize",
-            "moire":         "🕸️ Moiré Pattern",
-            "feedback_loop": "🔁 Feedback Loop",
-            "pixel_drift":   "💧 Pixel Drift",
-            "slit_scan":     "📷 Slit Scan",
-            "thermal":       "🌡️ Thermal Vision",
-            "ascii_glitch":  "⌨️ ASCII Glitch",
-            "halftone":      "🔵 Halftone Destroy",
-            "chroma_pulse":  "💥 Chroma Pulse",
-            "vhs":           "📼 VHS",
-            "broken_tv":     "📻 Broken TV",
-            "noise":         "📺 Noise",
-            "distruttivo":   "💥 Distruttivo",
-            "combined":      "🌟 Combinato",
-            "random":        "🎲 Random"
-        }[x]
-    )
+    # ─── LAYOUT 2 COLONNE: sinistra=controlli, destra=anteprima ───
+    col_ctrl, col_prev = st.columns([1, 1], gap="large")
 
-    # Parametri specifici per ogni effetto
-    params = {}
-    audio_params_override = None
+    with col_ctrl:
+        # ── EFFETTO ──────────────────────────────────────────────
+        effect_type = st.selectbox(
+            "🎭 Effetto glitch:",
+            ["pixel_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
+             "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
+             "moire", "feedback_loop", "pixel_drift",
+             "slit_scan", "thermal", "ascii_glitch", "halftone", "chroma_pulse",
+             "vhs", "broken_tv", "noise", "distruttivo", "combined", "random"],
+            format_func=lambda x: {
+                "pixel_sort":    "🔀 Pixel Sort",
+                "channel_shift": "🌈 Channel Shift",
+                "datamosh":      "💾 Datamosh",
+                "byte_corrupt":  "🦠 Byte Corrupt",
+                "slice_shift":   "✂️ Slice Shift",
+                "echo_smear":    "👻 Echo Smear",
+                "rgb_wave":      "🌊 RGB Wave",
+                "mirror_blocks": "🪞 Mirror Blocks",
+                "color_quantize":"🎨 Color Quantize",
+                "moire":         "🕸️ Moiré Pattern",
+                "feedback_loop": "🔁 Feedback Loop",
+                "pixel_drift":   "💧 Pixel Drift",
+                "slit_scan":     "📷 Slit Scan",
+                "thermal":       "🌡️ Thermal Vision",
+                "ascii_glitch":  "⌨️ ASCII Glitch",
+                "halftone":      "🔵 Halftone Destroy",
+                "chroma_pulse":  "💥 Chroma Pulse",
+                "vhs":           "📼 VHS",
+                "broken_tv":     "📻 Broken TV",
+                "noise":         "📺 Noise",
+                "distruttivo":   "💥 Distruttivo",
+                "combined":      "🌟 Combinato",
+                "random":        "🎲 Random"
+            }[x]
+        )
 
-    if effect_type == 'pixel_sort':
-        st.subheader("🔀 Pixel Sort")
-        col1, col2, col3 = st.columns(3)
-        with col1: ps_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: ps_threshold  = st.slider("Soglia luma", 0.1, 1.0, 0.5, 0.05)
-        with col3: ps_direction  = st.slider("Direzione (0=righe, 1=col)", 0.0, 1.0, 0.3, 0.05)
-        params = (ps_intensity, ps_threshold, ps_direction)
-
-    elif effect_type == 'channel_shift':
-        st.subheader("🌈 Channel Shift")
-        col1, col2, col3 = st.columns(3)
-        with col1: cs_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: cs_spread    = st.slider("Spread", 0.1, 3.0, 1.0, 0.1)
-        with col3: cs_mode      = st.slider("Verticale (0=no, 1=sì)", 0.0, 1.0, 0.3, 0.05)
-        params = (cs_intensity, cs_spread, cs_mode)
-
-    elif effect_type == 'datamosh':
-        st.subheader("💾 Datamosh")
-        col1, col2, col3 = st.columns(3)
-        with col1: dm_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: dm_block_size = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
-        with col3: dm_chaos      = st.slider("Chaos", 0.1, 3.0, 1.0, 0.1)
-        params = (dm_intensity, dm_block_size, dm_chaos)
-
-    elif effect_type == 'byte_corrupt':
-        st.subheader("🦠 Byte Corrupt")
-        col1, col2, col3 = st.columns(3)
-        with col1: bc_intensity   = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: bc_chunk_size  = st.slider("Chunk size", 0.1, 3.0, 1.0, 0.1)
-        with col3: bc_randomize   = st.slider("Random (0=dup, 1=rand)", 0.0, 1.0, 0.7, 0.05)
-        params = (bc_intensity, bc_chunk_size, bc_randomize)
-
-    elif effect_type == 'slice_shift':
-        st.subheader("✂️ Slice Shift")
-        col1, col2, col3 = st.columns(3)
-        with col1: ss_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: ss_num_slices = st.slider("Numero slice", 0.1, 3.0, 1.0, 0.1)
-        with col3: ss_drift      = st.slider("Drift", 0.1, 3.0, 1.0, 0.1)
-        params = (ss_intensity, ss_num_slices, ss_drift)
-
-    elif effect_type == 'slit_scan':
-        st.subheader("📷 Slit Scan")
-        col1, col2, col3 = st.columns(3)
-        with col1: sl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: sl_speed     = st.slider("Speed", 0.1, 3.0, 1.0, 0.1)
-        with col3: sl_tilt      = st.slider("Tilt", 0.0, 1.0, 0.5, 0.05)
-        params = (sl_intensity, sl_speed, sl_tilt)
-
-    elif effect_type == 'thermal':
-        st.subheader("🌡️ Thermal Vision")
-        col1, col2, col3 = st.columns(3)
-        with col1: th_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: th_noise      = st.slider("Noise sensore", 0.0, 1.0, 0.5, 0.05)
-        with col3: th_aberration = st.slider("Aberrazione", 0.0, 1.0, 0.5, 0.05)
-        params = (th_intensity, th_noise, th_aberration)
-
-    elif effect_type == 'ascii_glitch':
-        st.subheader("⌨️ ASCII Glitch")
-        col1, col2, col3 = st.columns(3)
-        with col1: ag_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: ag_block_size = st.slider("Block size", 0.1, 1.0, 0.5, 0.05)
-        with col3: ag_chaos      = st.slider("Chaos", 0.0, 1.0, 0.5, 0.05)
-        params = (ag_intensity, ag_block_size, ag_chaos)
-
-    elif effect_type == 'halftone':
-        st.subheader("🔵 Halftone Destroy")
-        col1, col2, col3 = st.columns(3)
-        with col1: ht_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: ht_dot_size  = st.slider("Dot size", 0.1, 1.0, 0.5, 0.05)
-        with col3: ht_angle     = st.slider("Angolo", 0.0, 1.0, 0.3, 0.05)
-        params = (ht_intensity, ht_dot_size, ht_angle)
-
-    elif effect_type == 'chroma_pulse':
-        st.subheader("💥 Chroma Pulse")
-        col1, col2, col3 = st.columns(3)
-        with col1: cp_intensity   = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: cp_radial      = st.slider("Radiale", 0.0, 1.0, 0.5, 0.05)
-        with col3: cp_pulse_speed = st.slider("Pulse speed", 0.1, 3.0, 1.0, 0.1)
-        params = (cp_intensity, cp_radial, cp_pulse_speed)
-
-    elif effect_type == 'moire':
-        st.subheader("🕸️ Moiré Pattern")
-        col1, col2, col3 = st.columns(3)
-        with col1: mo_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: mo_freq      = st.slider("Frequenza", 0.1, 5.0, 1.0, 0.1)
-        with col3: mo_angle     = st.slider("Angolo", 0.0, 1.0, 0.5, 0.05)
-        params = (mo_intensity, mo_freq, mo_angle)
-
-    elif effect_type == 'feedback_loop':
-        st.subheader("🔁 Feedback Loop")
-        col1, col2, col3 = st.columns(3)
-        with col1: fl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: fl_zoom      = st.slider("Zoom", 0.0, 1.0, 0.5, 0.05)
-        with col3: fl_rotate    = st.slider("Rotazione", 0.0, 1.0, 0.5, 0.05)
-        params = (fl_intensity, fl_zoom, fl_rotate)
-
-    elif effect_type == 'pixel_drift':
-        st.subheader("💧 Pixel Drift")
-        col1, col2, col3 = st.columns(3)
-        with col1: pd_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: pd_speed      = st.slider("Drift speed", 0.1, 3.0, 1.0, 0.1)
-        with col3: pd_turbulence = st.slider("Turbolenza", 0.0, 1.0, 0.5, 0.05)
-        params = (pd_intensity, pd_speed, pd_turbulence)
-
-    elif effect_type == 'echo_smear':
-        st.subheader("👻 Echo Smear")
-        col1, col2, col3 = st.columns(3)
-        with col1: es_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: es_decay     = st.slider("Decay", 0.0, 1.0, 0.5, 0.05)
-        with col3: es_smear     = st.slider("Smear", 0.1, 3.0, 1.0, 0.1)
-        params = (es_intensity, es_decay, es_smear)
-
-    elif effect_type == 'rgb_wave':
-        st.subheader("🌊 RGB Wave")
-        col1, col2, col3 = st.columns(3)
-        with col1: rw_intensity   = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: rw_freq        = st.slider("Frequenza", 0.1, 5.0, 1.0, 0.1)
-        with col3: rw_phase_chaos = st.slider("Phase chaos", 0.0, 1.0, 0.5, 0.05)
-        params = (rw_intensity, rw_freq, rw_phase_chaos)
-
-    elif effect_type == 'mirror_blocks':
-        st.subheader("🪞 Mirror Blocks")
-        col1, col2, col3 = st.columns(3)
-        with col1: mb_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: mb_block_size = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
-        with col3: mb_flip_prob  = st.slider("Flip prob", 0.0, 1.0, 0.5, 0.05)
-        params = (mb_intensity, mb_block_size, mb_flip_prob)
-
-    elif effect_type == 'color_quantize':
-        st.subheader("🎨 Color Quantize")
-        col1, col2, col3 = st.columns(3)
-        with col1: cq_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-        with col2: cq_levels    = st.slider("Livelli", 0.1, 3.0, 1.0, 0.1)
-        with col3: cq_dither    = st.slider("Dither", 0.0, 1.0, 0.5, 0.05)
-        params = (cq_intensity, cq_levels, cq_dither)
-
-    elif effect_type == 'vhs':
-        st.subheader("📼 Parametri VHS")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            vhs_intensity = st.slider("Intensità generale", 0.1, 3.0, 1.0, 0.1)
-        with col2:
-            scanline_freq = st.slider("Frequenza scanline", 0.1, 3.0, 1.0, 0.1)
-        with col3:
-            color_shift = st.slider("Color shift", 0.1, 3.0, 1.0, 0.1)
-        
-        params = (vhs_intensity, scanline_freq, color_shift)
+        # ── PARAMETRI PER EFFETTO ────────────────────────────────
+        params = {}
         audio_params_override = None
-        
-        if include_audio:
-            st.subheader("🎵 Parametri Audio VHS")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                wow_flutter = st.slider("Wow & Flutter", 0.1, 3.0, 1.0, 0.1)
-            with col2:
-                tape_hiss = st.slider("Tape Hiss", 0.1, 3.0, 1.0, 0.1)
-            audio_params_override = (vhs_intensity, wow_flutter, tape_hiss)
 
-    elif effect_type == 'distruttivo':
-        st.subheader("💥 Parametri Distruttivo")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            block_size = st.slider("Dimensione blocchi", 0.1, 3.0, 1.0, 0.1)
-        with col2:
-            num_blocks = st.slider("Numero blocchi", 0.1, 3.0, 1.0, 0.1)
-        with col3:
-            displacement = st.slider("Spostamento", 0.1, 3.0, 1.0, 0.1)
-        
-        params = (block_size, num_blocks, displacement)
-        audio_params_override = None
-        
-        if include_audio:
-            st.subheader("🎵 Parametri Audio Distruttivo")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                chaos_level = st.slider("Livello chaos", 0.1, 3.0, 1.0, 0.1)
-            with col2:
-                skip_prob = st.slider("Probabilità skip", 0.1, 3.0, 1.0, 0.1)
-            with col3:
-                reverse_prob = st.slider("Probabilità reverse", 0.1, 3.0, 1.0, 0.1)
-            audio_params_override = (chaos_level, skip_prob, reverse_prob)
+        if effect_type == 'pixel_sort':
+            c1,c2,c3 = st.columns(3)
+            with c1: ps_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: ps_threshold = st.slider("Soglia luma", 0.1, 1.0, 0.5, 0.05)
+            with c3: ps_direction = st.slider("Direzione", 0.0, 1.0, 0.3, 0.05)
+            params = (ps_intensity, ps_threshold, ps_direction)
 
-    elif effect_type == 'noise':
-        st.subheader("📺 Parametri Noise")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            noise_intensity = st.slider("Intensità noise", 0.1, 3.0, 1.0, 0.1)
-        with col2:
-            coverage = st.slider("Copertura", 0.1, 3.0, 1.0, 0.1)
-        with col3:
-            chaos = st.slider("Chaos", 0.1, 3.0, 1.0, 0.1)
-        
-        params = (noise_intensity, coverage, chaos)
-        audio_params_override = None
-        
-        if include_audio:
-            st.subheader("🎵 Parametri Audio Noise")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                digital_artifacts = st.slider("Artefatti digitali", 0.1, 3.0, 1.0, 0.1)
-            with col2:
-                bit_crush = st.slider("Bit Crushing", 0.1, 3.0, 1.0, 0.1)
-            audio_params_override = (noise_intensity, digital_artifacts, bit_crush)
+        elif effect_type == 'channel_shift':
+            c1,c2,c3 = st.columns(3)
+            with c1: cs_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: cs_spread    = st.slider("Spread", 0.1, 3.0, 1.0, 0.1)
+            with c3: cs_mode      = st.slider("Verticale", 0.0, 1.0, 0.3, 0.05)
+            params = (cs_intensity, cs_spread, cs_mode)
 
-    elif effect_type == 'broken_tv':
-        st.subheader("📻 Parametri Broken TV")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            shift_intensity = st.slider("Intensità shift", 0.1, 3.0, 1.0, 0.1)
-        with col2:
-            line_height = st.slider("Altezza linee", 0.1, 3.0, 1.0, 0.1)
-        with col3:
-            flicker_prob = st.slider("Probabilità flicker", 0.1, 3.0, 1.0, 0.1)
-        
-        params = (shift_intensity, line_height, flicker_prob)
-        audio_params_override = None
-        
-        if include_audio:
-            st.subheader("🎵 Parametri Audio Broken TV")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                static_intensity = st.slider("Intensità static", 0.1, 3.0, 1.0, 0.1)
-            with col2:
-                channel_separation = st.slider("Separazione canali", 0.1, 3.0, 1.0, 0.1)
-            with col3:
-                frequency_drift = st.slider("Drift frequenza", 0.1, 3.0, 1.0, 0.1)
-            audio_params_override = (static_intensity, channel_separation, frequency_drift)
+        elif effect_type == 'datamosh':
+            c1,c2,c3 = st.columns(3)
+            with c1: dm_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: dm_block_size = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
+            with c3: dm_chaos      = st.slider("Chaos", 0.1, 3.0, 1.0, 0.1)
+            params = (dm_intensity, dm_block_size, dm_chaos)
 
-    elif effect_type == 'combined':
-        st.subheader("🌟 Parametri Combinato")
-        
-        # Selettore degli effetti da combinare
-        st.write("Seleziona gli effetti da combinare:")
-        apply_vhs = st.checkbox("📼 VHS", value=True)
-        apply_distruttivo = st.checkbox("💥 Distruttivo", value=True)
-        apply_noise = st.checkbox("📺 Noise", value=True)
-        apply_broken_tv = st.checkbox("📻 Broken TV", value=True)
-        
-        params = {
-            "apply_vhs": apply_vhs,
-            "apply_distruttivo": apply_distruttivo,
-            "apply_noise": apply_noise,
-            "apply_broken_tv": apply_broken_tv
-        }
-        
-        # Parametri specifici per ogni effetto attivo
-        if apply_vhs:
-            st.write("**Parametri VHS:**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                params["vhs_intensity"] = st.slider("VHS Intensità", 0.1, 3.0, 1.0, 0.1, key="vhs_int")
-            with col2:
-                params["vhs_scanline_freq"] = st.slider("VHS Scanline", 0.1, 3.0, 1.0, 0.1, key="vhs_scan")
-            with col3:
-                params["vhs_color_shift"] = st.slider("VHS Color", 0.1, 3.0, 1.0, 0.1, key="vhs_color")
-            
-            if include_audio:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    params["vhs_wow_flutter"] = st.slider("VHS Wow&Flutter", 0.1, 3.0, 1.0, 0.1, key="vhs_wow")
-                with col2:
-                    params["vhs_tape_hiss"] = st.slider("VHS Tape Hiss", 0.1, 3.0, 1.0, 0.1, key="vhs_hiss")
-        
-        if apply_distruttivo:
-            st.write("**Parametri Distruttivo:**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                params["dest_block_size"] = st.slider("Dest Block Size", 0.1, 3.0, 1.0, 0.1, key="dest_block")
-            with col2:
-                params["dest_num_blocks"] = st.slider("Dest Num Blocks", 0.1, 3.0, 1.0, 0.1, key="dest_num")
-            with col3:
-                params["dest_displacement"] = st.slider("Dest Displacement", 0.1, 3.0, 1.0, 0.1, key="dest_disp")
-            
-            if include_audio:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    params["dest_chaos_level"] = st.slider("Dest Chaos", 0.1, 3.0, 1.0, 0.1, key="dest_chaos")
-                with col2:
-                    params["dest_skip_prob"] = st.slider("Dest Skip", 0.1, 3.0, 1.0, 0.1, key="dest_skip")
-                with col3:
-                    params["dest_reverse_prob"] = st.slider("Dest Reverse", 0.1, 3.0, 1.0, 0.1, key="dest_rev")
-        
-        if apply_noise:
-            st.write("**Parametri Noise:**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                params["noise_intensity"] = st.slider("Noise Intensity", 0.1, 3.0, 1.0, 0.1, key="noise_int")
-            with col2:
-                params["noise_coverage"] = st.slider("Noise Coverage", 0.1, 3.0, 1.0, 0.1, key="noise_cov")
-            with col3:
-                params["noise_chaos"] = st.slider("Noise Chaos", 0.1, 3.0, 1.0, 0.1, key="noise_chaos")
-            
-            if include_audio:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    params["noise_digital_artifacts"] = st.slider("Noise Artifacts", 0.1, 3.0, 1.0, 0.1, key="noise_art")
-                with col2:
-                    params["noise_bit_crush"] = st.slider("Noise Bit Crush", 0.1, 3.0, 1.0, 0.1, key="noise_bit")
-        
-        if apply_broken_tv:
-            st.write("**Parametri Broken TV:**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                params["tv_shift_intensity"] = st.slider("TV Shift", 0.1, 3.0, 1.0, 0.1, key="tv_shift")
-            with col2:
-                params["tv_line_height"] = st.slider("TV Line Height", 0.1, 3.0, 1.0, 0.1, key="tv_line")
-            with col3:
-                params["tv_flicker_prob"] = st.slider("TV Flicker", 0.1, 3.0, 1.0, 0.1, key="tv_flick")
-            
-            if include_audio:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    params["tv_static_intensity"] = st.slider("TV Static", 0.1, 3.0, 1.0, 0.1, key="tv_static")
-                with col2:
-                    params["tv_channel_separation"] = st.slider("TV Channel Sep", 0.1, 3.0, 1.0, 0.1, key="tv_chan")
-                with col3:
-                    params["tv_frequency_drift"] = st.slider("TV Freq Drift", 0.1, 3.0, 1.0, 0.1, key="tv_drift")
+        elif effect_type == 'byte_corrupt':
+            c1,c2,c3 = st.columns(3)
+            with c1: bc_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: bc_chunk_size = st.slider("Chunk size", 0.1, 3.0, 1.0, 0.1)
+            with c3: bc_randomize  = st.slider("Random", 0.0, 1.0, 0.7, 0.05)
+            params = (bc_intensity, bc_chunk_size, bc_randomize)
 
-    elif effect_type == 'random':
-        st.subheader("🎲 Parametri Random")
-        random_level = st.slider("Livello di casualità", 0.1, 3.0, 1.0, 0.1)
-        params = (random_level,)
-        audio_params_override = None  # random sceglie da solo
+        elif effect_type == 'slice_shift':
+            c1,c2,c3 = st.columns(3)
+            with c1: ss_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: ss_num_slices = st.slider("Num slices", 0.1, 3.0, 1.0, 0.1)
+            with c3: ss_drift      = st.slider("Drift", 0.1, 3.0, 1.0, 0.1)
+            params = (ss_intensity, ss_num_slices, ss_drift)
 
-    # audio_params_override per combined: usa params dict direttamente (già contiene chiavi audio)
-    if effect_type == 'combined':
-        audio_params_override = None  # combined usa params dict che già include i valori audio
+        elif effect_type == 'slit_scan':
+            c1,c2,c3 = st.columns(3)
+            with c1: sl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: sl_speed     = st.slider("Speed", 0.1, 3.0, 1.0, 0.1)
+            with c3: sl_tilt      = st.slider("Tilt", 0.0, 1.0, 0.5, 0.05)
+            params = (sl_intensity, sl_speed, sl_tilt)
 
-    # Limita frame per video lunghi
-    max_frames = st.number_input("🎬 Limite frame (0 = nessun limite)", min_value=0, max_value=10000, value=0)
+        elif effect_type == 'thermal':
+            c1,c2,c3 = st.columns(3)
+            with c1: th_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: th_noise      = st.slider("Noise sensore", 0.0, 1.0, 0.5, 0.05)
+            with c3: th_aberration = st.slider("Aberrazione", 0.0, 1.0, 0.5, 0.05)
+            params = (th_intensity, th_noise, th_aberration)
 
-    # --- AUDIO REACTIVE ---
-    st.markdown("---")
-    st.subheader("🎵 Audio Reactive")
-    use_audio_reactive = st.toggle("🎚️ Effetto pilotato dall'audio",
-        help="Analizza l'audio (RMS, beat, freq basse/alte) e modula i parametri frame per frame.")
-    ar_intensity = 0.0
-    if use_audio_reactive:
-        ar_intensity = st.slider("Intensità reattività", 0.1, 3.0, 1.0, 0.1, key="ar_intensity")
-        st.caption("🔵 RMS → intensità globale  |  🟠 Beat → flash  |  🟣 Basse → param 1  |  🟡 Alte → param 2")
+        elif effect_type == 'ascii_glitch':
+            c1,c2,c3 = st.columns(3)
+            with c1: ag_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: ag_block_size = st.slider("Block size", 0.1, 1.0, 0.5, 0.05)
+            with c3: ag_chaos      = st.slider("Chaos", 0.0, 1.0, 0.5, 0.05)
+            params = (ag_intensity, ag_block_size, ag_chaos)
 
-    # KEYFRAME — solo per effetti singoli (non combined/random)
-    kf_df = None
-    use_keyframes = False
-    if effect_type not in ['combined', 'random']:
+        elif effect_type == 'halftone':
+            c1,c2,c3 = st.columns(3)
+            with c1: ht_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: ht_dot_size  = st.slider("Dot size", 0.1, 1.0, 0.5, 0.05)
+            with c3: ht_angle     = st.slider("Angolo", 0.0, 1.0, 0.3, 0.05)
+            params = (ht_intensity, ht_dot_size, ht_angle)
+
+        elif effect_type == 'chroma_pulse':
+            c1,c2,c3 = st.columns(3)
+            with c1: cp_intensity   = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: cp_radial      = st.slider("Radiale", 0.0, 1.0, 0.5, 0.05)
+            with c3: cp_pulse_speed = st.slider("Pulse speed", 0.1, 3.0, 1.0, 0.1)
+            params = (cp_intensity, cp_radial, cp_pulse_speed)
+
+        elif effect_type == 'moire':
+            c1,c2,c3 = st.columns(3)
+            with c1: mo_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: mo_freq      = st.slider("Frequenza", 0.1, 5.0, 1.0, 0.1)
+            with c3: mo_angle     = st.slider("Angolo", 0.0, 1.0, 0.5, 0.05)
+            params = (mo_intensity, mo_freq, mo_angle)
+
+        elif effect_type == 'feedback_loop':
+            c1,c2,c3 = st.columns(3)
+            with c1: fl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: fl_zoom      = st.slider("Zoom", 0.0, 1.0, 0.5, 0.05)
+            with c3: fl_rotate    = st.slider("Rotazione", 0.0, 1.0, 0.5, 0.05)
+            params = (fl_intensity, fl_zoom, fl_rotate)
+
+        elif effect_type == 'pixel_drift':
+            c1,c2,c3 = st.columns(3)
+            with c1: pd_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: pd_speed      = st.slider("Drift speed", 0.1, 3.0, 1.0, 0.1)
+            with c3: pd_turbulence = st.slider("Turbolenza", 0.0, 1.0, 0.5, 0.05)
+            params = (pd_intensity, pd_speed, pd_turbulence)
+
+        elif effect_type == 'echo_smear':
+            c1,c2,c3 = st.columns(3)
+            with c1: es_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: es_decay     = st.slider("Decay", 0.0, 1.0, 0.5, 0.05)
+            with c3: es_smear     = st.slider("Smear", 0.1, 3.0, 1.0, 0.1)
+            params = (es_intensity, es_decay, es_smear)
+
+        elif effect_type == 'rgb_wave':
+            c1,c2,c3 = st.columns(3)
+            with c1: rw_intensity   = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: rw_freq        = st.slider("Frequenza", 0.1, 5.0, 1.0, 0.1)
+            with c3: rw_phase_chaos = st.slider("Phase chaos", 0.0, 1.0, 0.5, 0.05)
+            params = (rw_intensity, rw_freq, rw_phase_chaos)
+
+        elif effect_type == 'mirror_blocks':
+            c1,c2,c3 = st.columns(3)
+            with c1: mb_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: mb_block_size = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
+            with c3: mb_flip_prob  = st.slider("Flip prob", 0.0, 1.0, 0.5, 0.05)
+            params = (mb_intensity, mb_block_size, mb_flip_prob)
+
+        elif effect_type == 'color_quantize':
+            c1,c2,c3 = st.columns(3)
+            with c1: cq_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: cq_levels    = st.slider("Livelli", 0.1, 3.0, 1.0, 0.1)
+            with c3: cq_dither    = st.slider("Dither", 0.0, 1.0, 0.5, 0.05)
+            params = (cq_intensity, cq_levels, cq_dither)
+
+        elif effect_type == 'vhs':
+            c1,c2,c3 = st.columns(3)
+            with c1: vhs_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: scanline_freq = st.slider("Scanline", 0.1, 3.0, 1.0, 0.1)
+            with c3: color_shift   = st.slider("Color shift", 0.1, 3.0, 1.0, 0.1)
+            params = (vhs_intensity, scanline_freq, color_shift)
+
+        elif effect_type == 'distruttivo':
+            c1,c2,c3 = st.columns(3)
+            with c1: block_size   = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
+            with c2: num_blocks   = st.slider("Num blocks", 0.1, 3.0, 1.0, 0.1)
+            with c3: displacement = st.slider("Displacement", 0.1, 3.0, 1.0, 0.1)
+            params = (block_size, num_blocks, displacement)
+
+        elif effect_type == 'noise':
+            c1,c2,c3 = st.columns(3)
+            with c1: noise_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: coverage        = st.slider("Coverage", 0.1, 3.0, 1.0, 0.1)
+            with c3: chaos           = st.slider("Chaos", 0.1, 3.0, 1.0, 0.1)
+            params = (noise_intensity, coverage, chaos)
+
+        elif effect_type == 'broken_tv':
+            c1,c2,c3 = st.columns(3)
+            with c1: shift_intensity = st.slider("Shift", 0.1, 3.0, 1.0, 0.1)
+            with c2: line_height     = st.slider("Line height", 0.1, 3.0, 1.0, 0.1)
+            with c3: flicker_prob    = st.slider("Flicker", 0.1, 3.0, 1.0, 0.1)
+            params = (shift_intensity, line_height, flicker_prob)
+
+        elif effect_type == 'combined':
+            st.write("Seleziona gli effetti da combinare:")
+            apply_vhs        = st.checkbox("📼 VHS", value=True)
+            apply_distruttivo= st.checkbox("💥 Distruttivo", value=True)
+            apply_noise      = st.checkbox("📺 Noise", value=True)
+            apply_broken_tv  = st.checkbox("📻 Broken TV", value=True)
+            params = {"apply_vhs": apply_vhs, "apply_distruttivo": apply_distruttivo,
+                      "apply_noise": apply_noise, "apply_broken_tv": apply_broken_tv}
+            if apply_vhs:
+                c1,c2,c3 = st.columns(3)
+                with c1: params["vhs_intensity"]   = st.slider("VHS Intensità", 0.1, 3.0, 1.0, 0.1, key="vhs_int")
+                with c2: params["vhs_scanline_freq"]= st.slider("VHS Scanline",  0.1, 3.0, 1.0, 0.1, key="vhs_scan")
+                with c3: params["vhs_color_shift"]  = st.slider("VHS Color",     0.1, 3.0, 1.0, 0.1, key="vhs_color")
+            if apply_distruttivo:
+                c1,c2,c3 = st.columns(3)
+                with c1: params["dest_block_size"]  = st.slider("Dest Block",   0.1, 3.0, 1.0, 0.1, key="dest_block")
+                with c2: params["dest_num_blocks"]  = st.slider("Dest Num",     0.1, 3.0, 1.0, 0.1, key="dest_num")
+                with c3: params["dest_displacement"]= st.slider("Dest Disp",    0.1, 3.0, 1.0, 0.1, key="dest_disp")
+            if apply_noise:
+                c1,c2,c3 = st.columns(3)
+                with c1: params["noise_intensity"]  = st.slider("Noise Int",    0.1, 3.0, 1.0, 0.1, key="noise_int")
+                with c2: params["noise_coverage"]   = st.slider("Noise Cov",    0.1, 3.0, 1.0, 0.1, key="noise_cov")
+                with c3: params["noise_chaos"]      = st.slider("Noise Chaos",  0.1, 3.0, 1.0, 0.1, key="noise_chaos")
+            if apply_broken_tv:
+                c1,c2,c3 = st.columns(3)
+                with c1: params["tv_shift_intensity"]    = st.slider("TV Shift",  0.1, 3.0, 1.0, 0.1, key="tv_shift")
+                with c2: params["tv_line_height"]        = st.slider("TV Line",   0.1, 3.0, 1.0, 0.1, key="tv_line")
+                with c3: params["tv_flicker_prob"]       = st.slider("TV Flicker",0.1, 3.0, 1.0, 0.1, key="tv_flick")
+            audio_params_override = None  # combined usa il dict params
+
+        elif effect_type == 'random':
+            random_level = st.slider("Livello casualità", 0.1, 3.0, 1.0, 0.1)
+            params = (random_level,)
+
         st.markdown("---")
-        use_keyframes = st.toggle("⏱️ Animazione intensità nel tempo",
-            help="Interpola l'intensità dell'effetto dall'inizio alla fine del video.")
-        if use_keyframes:
-            col_kf1, col_kf2 = st.columns(2)
-            with col_kf1:
-                kf_start = st.slider("Intensità inizio", 0.0, 3.0, 0.5, 0.1, key="kf_start")
-            with col_kf2:
-                kf_end = st.slider("Intensità fine", 0.0, 3.0, 1.5, 0.1, key="kf_end")
-            import pandas as pd
-            cap_tmp = cv2.VideoCapture(video_path)
-            fps_tmp = cap_tmp.get(cv2.CAP_PROP_FPS) or 24
-            frames_tmp = cap_tmp.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-            cap_tmp.release()
-            dur_est = round(frames_tmp / fps_tmp, 1) if fps_tmp > 0 else 10.0
-            kf_df = pd.DataFrame({"Secondo": [0.0, dur_est], "Intensita'": [kf_start, kf_end]})
 
-    # --- ANTEPRIMA LIVE (si aggiorna ad ogni cambio slider) ---
-    st.markdown("---")
-    st.caption("🖼️ Anteprima live")
-    try:
-        cap_live = cv2.VideoCapture(video_path)
-        total_f_live = int(cap_live.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap_live.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_f_live // 3))
-        ret_live, frame_live = cap_live.read()
-        cap_live.release()
-        if ret_live:
-            if effect_type == 'pixel_sort':
-                prev_frame = glitch_pixel_sort(frame_live, *params)
-            elif effect_type == 'channel_shift':
-                prev_frame = glitch_channel_shift(frame_live, *params)
-            elif effect_type == 'datamosh':
-                # per preview datamosh usiamo frame_live come prev (stesso frame = ghosting)
-                prev_frame = glitch_datamosh(frame_live, frame_live, *params)
-            elif effect_type == 'byte_corrupt':
-                prev_frame = glitch_byte_corrupt(frame_live, *params)
-            elif effect_type == 'slice_shift':
-                prev_frame = glitch_slice_shift(frame_live, *params)
-            elif effect_type == 'slit_scan':
-                prev_frame = glitch_slit_scan(frame_live, [frame_live], *params)
-            elif effect_type == 'thermal':
-                prev_frame = glitch_thermal(frame_live, *params)
-            elif effect_type == 'ascii_glitch':
-                prev_frame = glitch_ascii_glitch(frame_live, *params)
-            elif effect_type == 'halftone':
-                prev_frame = glitch_halftone(frame_live, *params)
-            elif effect_type == 'chroma_pulse':
-                prev_frame = glitch_chroma_pulse(frame_live, *params, _frame_idx=0)
-            elif effect_type == 'moire':
-                prev_frame = glitch_moire(frame_live, *params)
-            elif effect_type == 'feedback_loop':
-                prev_frame = glitch_feedback_loop(frame_live, frame_live, *params)
-            elif effect_type == 'pixel_drift':
-                prev_frame = glitch_pixel_drift(frame_live, *params)
-            elif effect_type == 'echo_smear':
-                prev_frame = glitch_echo_smear(frame_live, frame_live, *params)
-            elif effect_type == 'rgb_wave':
-                prev_frame = glitch_rgb_wave(frame_live, *params)
-            elif effect_type == 'mirror_blocks':
-                prev_frame = glitch_mirror_blocks(frame_live, *params)
-            elif effect_type == 'color_quantize':
-                prev_frame = glitch_color_quantize(frame_live, *params)
-            elif effect_type == 'vhs':
-                prev_frame = glitch_vhs_frame(frame_live, *params)
-            elif effect_type == 'distruttivo':
-                prev_frame = glitch_distruttivo_frame(frame_live, *params)
-            elif effect_type == 'noise':
-                prev_frame = glitch_noise_frame(frame_live, *params)
-            elif effect_type == 'broken_tv':
-                prev_frame = glitch_broken_tv_frame(frame_live, *params)
-            elif effect_type == 'combined':
-                prev_frame = frame_live.copy()
-                if params.get("apply_vhs"):
-                    prev_frame = glitch_vhs_frame(prev_frame, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
-                if params.get("apply_distruttivo"):
-                    prev_frame = glitch_distruttivo_frame(prev_frame, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
-                if params.get("apply_noise"):
-                    prev_frame = glitch_noise_frame(prev_frame, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
-                if params.get("apply_broken_tv"):
-                    prev_frame = glitch_broken_tv_frame(prev_frame, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
-                if params.get("apply_pixel_sort"):
-                    prev_frame = glitch_pixel_sort(prev_frame, params.get("ps_intensity",1.0), params.get("ps_threshold",0.5), params.get("ps_direction",0.3))
-                if params.get("apply_channel_shift"):
-                    prev_frame = glitch_channel_shift(prev_frame, params.get("cs_intensity",1.0), params.get("cs_spread",1.0), params.get("cs_mode",0.3))
-                if params.get("apply_slice_shift"):
-                    prev_frame = glitch_slice_shift(prev_frame, params.get("ss_intensity",1.0), params.get("ss_num_slices",1.0), params.get("ss_drift",1.0))
-            elif effect_type == 'random':
-                random_level = params[0] if params else 1.0
-                chosen = random.choice(['pixel_sort','channel_shift','byte_corrupt','slice_shift','vhs','broken_tv','noise','distruttivo'])
-                rp = tuple(random.uniform(0.5, 1.5) * random_level for _ in range(3))
-                fn_map = {'pixel_sort': glitch_pixel_sort, 'channel_shift': glitch_channel_shift, 'byte_corrupt': glitch_byte_corrupt, 'slice_shift': glitch_slice_shift, 'vhs': glitch_vhs_frame, 'broken_tv': glitch_broken_tv_frame, 'noise': glitch_noise_frame, 'distruttivo': glitch_distruttivo_frame}
-                prev_frame = fn_map[chosen](frame_live, *rp)
-            else:
-                prev_frame = frame_live
-            prev_rgb = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2RGB)
-            st.image(prev_rgb, use_container_width=True)
-    except Exception as e:
-        st.caption(f"Anteprima non disponibile: {e}")
-
-    # --- PROPORZIONI EXPORT ---
-    st.markdown("---")
-    st.subheader("📐 Proporzioni export")
-    aspect_ratio = st.radio(
-        "Formato output:",
-        ["Originale", "16:9", "9:16", "1:1"],
-        horizontal=True
-    )
-
-    # Bottone per processare
-    if st.button("🚀 Processa Video"):
-        if not any([effect_type != 'combined' or any(params.values()) if isinstance(params, dict) else True]):
-            st.warning("⚠️ Seleziona almeno un effetto per la modalità combinata!")
+        # ── MODALITÀ AUDIO ───────────────────────────────────────
+        # Un solo file uploader, 4 modalità chiare
+        st.markdown("**🎵 Audio**")
+        if not ffmpeg_available:
+            audio_mode = "0_originale"
+            st.caption("⚠️ FFmpeg non disponibile — audio originale invariato.")
         else:
-            with st.spinner("🔥 Processando il video..."):
-                # Calcola envelope keyframe se attivo
-                kf_envelope = None
-                if use_keyframes and kf_df is not None and len(kf_df) >= 2:
-                    cap_info = cv2.VideoCapture(video_path)
-                    fps_info = int(cap_info.get(cv2.CAP_PROP_FPS)) or 24
-                    frames_info = int(cap_info.get(cv2.CAP_PROP_FRAME_COUNT))
-                    cap_info.release()
-                    if max_frames > 0:
-                        frames_info = min(frames_info, max_frames)
-                    kf_envelope = interpolate_keyframes(kf_df, fps_info, frames_info)
+            audio_mode = st.radio(
+                "Modalità:",
+                ["0_originale", "2_distruggi", "1_mix", "3_esterno", "4_esterno_distruggi"],
+                format_func=lambda x: {
+                    "0_originale":        "🔇 Originale (nessuna modifica)",
+                    "2_distruggi":        "💥 Distruggi audio originale",
+                    "1_mix":              "🎛️ Mixa originale + glitch",
+                    "3_esterno":          "🎵 Usa audio caricato",
+                    "4_esterno_distruggi":"🔥 Usa audio caricato + distruggi",
+                }[x],
+                horizontal=False,
+                key="audio_mode_radio"
+            )
 
-                # Analisi audio per audio-reactive
-                audio_env = None
-                if use_audio_reactive:
-                    with st.spinner("🎵 Analisi audio..."):
-                        # estrai audio temp per analisi
-                        _tmp_wav = extract_audio(video_path)
-                        if _tmp_wav:
-                            cap_ar = cv2.VideoCapture(video_path)
-                            _fps_ar = cap_ar.get(cv2.CAP_PROP_FPS) or 24
-                            _tot_ar = int(cap_ar.get(cv2.CAP_PROP_FRAME_COUNT))
-                            cap_ar.release()
-                            audio_env = analyze_audio_for_video(_tmp_wav, _fps_ar, _tot_ar)
-                            try: os.unlink(_tmp_wav)
-                            except: pass
+        uploaded_audio_inline = None
+        if audio_mode in ("3_esterno", "4_esterno_distruggi"):
+            uploaded_audio_inline = st.file_uploader(
+                "📂 Carica audio (mp3/wav/aac/ogg/flac/m4a)",
+                type=["mp3","wav","aac","ogg","flac","m4a"],
+                key="audio_inline_uploader"
+            )
 
-                # Gestione audio source per modalità 1_carica
-                audio_source_path = None
-                if audio_mode == "1_carica" and uploaded_audio_inline is not None:
-                    ext = os.path.splitext(uploaded_audio_inline.name)[1].lower()
-                    fd_as, audio_source_path = tempfile.mkstemp(suffix=ext)
-                    os.close(fd_as)
-                    with open(audio_source_path, 'wb') as f:
-                        f.write(uploaded_audio_inline.read())
+        # Parametri audio override solo per effetti con audio dedicato
+        AUDIO_FX = {'vhs','distruttivo','noise','broken_tv','combined'}
+        include_audio = audio_mode != "0_originale" and ffmpeg_available
+        if include_audio and effect_type in AUDIO_FX and effect_type != 'combined':
+            with st.expander("⚙️ Parametri audio effetto", expanded=False):
+                ca1,ca2,ca3 = st.columns(3)
+                with ca1: a_p1 = st.slider("Audio P1", 0.1, 3.0, 1.0, 0.1, key="aud_p1")
+                with ca2: a_p2 = st.slider("Audio P2", 0.1, 3.0, 1.0, 0.1, key="aud_p2")
+                with ca3: a_p3 = st.slider("Audio P3", 0.1, 3.0, 1.0, 0.1, key="aud_p3")
+                audio_params_override = (a_p1, a_p2, a_p3)
 
-                result_path = process_video(video_path, effect_type, params, max_frames,
-                                            audio_mode, kf_envelope, audio_params_override,
-                                            aspect_ratio, audio_source_path,
-                                            audio_env, ar_intensity)
-                
-                if result_path:
-                    st.success("✅ Video processato!")
-                    with st.spinner("🗜️ H.264..."):
-                        h264_path = recompress_h264(result_path, aspect_ratio)
+        st.markdown("---")
 
-                    orig_size  = get_file_size_mb(video_path)
-                    fps_v, w_v, h_v, frames_v, dur_v = get_video_info(video_path)
-                    out_size   = get_file_size_mb(h264_path)
+        # ── AUDIO REACTIVE ───────────────────────────────────────
+        use_audio_reactive = st.toggle("🎚️ Audio Reactive",
+            help="Analizza RMS/beat/freq e modula i parametri frame per frame.")
+        ar_intensity = 0.0
+        if use_audio_reactive:
+            ar_intensity = st.slider("Intensità reattività", 0.1, 3.0, 1.0, 0.1, key="ar_intensity")
 
-                    video_stem = os.path.splitext(uploaded_file.name)[0]
-                    effect_label = {
-                        "pixel_sort":"PixelSort","channel_shift":"ChannelShift",
-                        "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
-                        "slice_shift":"SliceShift","echo_smear":"EchoSmear",
-                        "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
-                        "color_quantize":"ColorQuantize","moire":"Moire",
-                        "feedback_loop":"FeedbackLoop","pixel_drift":"PixelDrift",
-                        "slit_scan":"SlitScan","thermal":"Thermal",
-                        "ascii_glitch":"AsciiGlitch","halftone":"Halftone",
-                        "chroma_pulse":"ChromaPulse",
-                        "vhs":"VHS","distruttivo":"Distruttivo","noise":"Noise",
-                        "combined":"Combinato","broken_tv":"BrokenTV","random":"Random"
-                    }[effect_type]
-                    output_video_name = f"{video_stem}_{effect_label}.mp4"
-                    report_name       = f"{video_stem}_{effect_label}.txt"
+        # ── KEYFRAME ─────────────────────────────────────────────
+        kf_df = None
+        use_keyframes = False
+        if effect_type not in ['combined','random']:
+            use_keyframes = st.toggle("⏱️ Animazione intensità",
+                help="Interpola l'intensità dall'inizio alla fine del video.")
+            if use_keyframes:
+                ck1, ck2 = st.columns(2)
+                with ck1: kf_start = st.slider("Intensità inizio", 0.0, 3.0, 0.5, 0.1, key="kf_start")
+                with ck2: kf_end   = st.slider("Intensità fine",   0.0, 3.0, 1.5, 0.1, key="kf_end")
+                import pandas as pd
+                cap_tmp = cv2.VideoCapture(video_path)
+                fps_tmp  = cap_tmp.get(cv2.CAP_PROP_FPS) or 24
+                frames_tmp = cap_tmp.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                cap_tmp.release()
+                dur_est = round(frames_tmp / fps_tmp, 1) if fps_tmp > 0 else 10.0
+                kf_df = pd.DataFrame({"Secondo": [0.0, dur_est], "Intensita'": [kf_start, kf_end]})
 
-                    st.session_state.report_data = build_report(
-                        uploaded_file.name, orig_size, out_size,
-                        fps_v, w_v, h_v, frames_v, dur_v,
-                        effect_type, params, audio_mode != "0_originale", kf_df
-                    )
-                    st.session_state.h264_path         = h264_path
-                    st.session_state.output_video_name = output_video_name
-                    st.session_state.orig_filename     = uploaded_file.name
-                    st.session_state.report_filename   = report_name
-                    st.session_state.video_ready       = True
+        # ── PROPORZIONI EXPORT ───────────────────────────────────
+        aspect_ratio = st.radio("📐 Formato output:",
+            ["Originale","16:9","9:16","1:1"], horizontal=True)
 
-                    for p in [result_path, video_path]:
-                        try: os.unlink(p)
-                        except: pass
+        # ── LIMITE FRAME ─────────────────────────────────────────
+        max_frames = st.number_input("🎬 Limite frame (0=nessun limite)",
+            min_value=0, max_value=10000, value=0)
+
+        # ── BOTTONE PROCESSA ─────────────────────────────────────
+        do_process = st.button("🚀 Processa Video", use_container_width=True)
+
+    # ── COLONNA DESTRA: ANTEPRIMA LIVE ──────────────────────────
+    with col_prev:
+        st.caption("🖼️ Anteprima live")
+        try:
+            cap_live = cv2.VideoCapture(video_path)
+            total_f_live = int(cap_live.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap_live.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_f_live // 3))
+            ret_live, frame_live = cap_live.read()
+            cap_live.release()
+            if ret_live:
+                if effect_type == 'pixel_sort':
+                    pf = glitch_pixel_sort(frame_live, *params)
+                elif effect_type == 'channel_shift':
+                    pf = glitch_channel_shift(frame_live, *params)
+                elif effect_type == 'datamosh':
+                    pf = glitch_datamosh(frame_live, frame_live, *params)
+                elif effect_type == 'byte_corrupt':
+                    pf = glitch_byte_corrupt(frame_live, *params)
+                elif effect_type == 'slice_shift':
+                    pf = glitch_slice_shift(frame_live, *params)
+                elif effect_type == 'slit_scan':
+                    pf = glitch_slit_scan(frame_live, [frame_live], *params)
+                elif effect_type == 'thermal':
+                    pf = glitch_thermal(frame_live, *params)
+                elif effect_type == 'ascii_glitch':
+                    pf = glitch_ascii_glitch(frame_live, *params)
+                elif effect_type == 'halftone':
+                    pf = glitch_halftone(frame_live, *params)
+                elif effect_type == 'chroma_pulse':
+                    pf = glitch_chroma_pulse(frame_live, *params, _frame_idx=0)
+                elif effect_type == 'moire':
+                    pf = glitch_moire(frame_live, *params)
+                elif effect_type == 'feedback_loop':
+                    pf = glitch_feedback_loop(frame_live, frame_live, *params)
+                elif effect_type == 'pixel_drift':
+                    pf = glitch_pixel_drift(frame_live, *params)
+                elif effect_type == 'echo_smear':
+                    pf = glitch_echo_smear(frame_live, frame_live, *params)
+                elif effect_type == 'rgb_wave':
+                    pf = glitch_rgb_wave(frame_live, *params)
+                elif effect_type == 'mirror_blocks':
+                    pf = glitch_mirror_blocks(frame_live, *params)
+                elif effect_type == 'color_quantize':
+                    pf = glitch_color_quantize(frame_live, *params)
+                elif effect_type == 'vhs':
+                    pf = glitch_vhs_frame(frame_live, *params)
+                elif effect_type == 'distruttivo':
+                    pf = glitch_distruttivo_frame(frame_live, *params)
+                elif effect_type == 'noise':
+                    pf = glitch_noise_frame(frame_live, *params)
+                elif effect_type == 'broken_tv':
+                    pf = glitch_broken_tv_frame(frame_live, *params)
+                elif effect_type == 'combined':
+                    pf = frame_live.copy()
+                    if params.get("apply_vhs"):
+                        pf = glitch_vhs_frame(pf, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
+                    if params.get("apply_distruttivo"):
+                        pf = glitch_distruttivo_frame(pf, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+                    if params.get("apply_noise"):
+                        pf = glitch_noise_frame(pf, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
+                    if params.get("apply_broken_tv"):
+                        pf = glitch_broken_tv_frame(pf, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
+                elif effect_type == 'random':
+                    rl = params[0] if params else 1.0
+                    chosen = random.choice(['pixel_sort','channel_shift','byte_corrupt','slice_shift','vhs','broken_tv','noise','distruttivo'])
+                    rp = tuple(random.uniform(0.5,1.5)*rl for _ in range(3))
+                    _fn = {'pixel_sort':glitch_pixel_sort,'channel_shift':glitch_channel_shift,'byte_corrupt':glitch_byte_corrupt,'slice_shift':glitch_slice_shift,'vhs':glitch_vhs_frame,'broken_tv':glitch_broken_tv_frame,'noise':glitch_noise_frame,'distruttivo':glitch_distruttivo_frame}
+                    pf = _fn[chosen](frame_live, *rp)
                 else:
-                    st.error("❌ Errore durante il processing.")
+                    pf = frame_live
+                st.image(cv2.cvtColor(pf, cv2.COLOR_BGR2RGB), use_container_width=True)
+        except Exception as e:
+            st.caption(f"Anteprima non disponibile: {e}")
+
+    # ── PROCESSING (fuori dalle colonne) ────────────────────────
+    if do_process:
+        with st.spinner("🔥 Processando il video..."):
+            # Calcola envelope keyframe
+            kf_envelope = None
+            if use_keyframes and kf_df is not None and len(kf_df) >= 2:
+                cap_info = cv2.VideoCapture(video_path)
+                fps_info   = int(cap_info.get(cv2.CAP_PROP_FPS)) or 24
+                frames_info= int(cap_info.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap_info.release()
+                if max_frames > 0:
+                    frames_info = min(frames_info, max_frames)
+                kf_envelope = interpolate_keyframes(kf_df, fps_info, frames_info)
+
+            # Analisi audio reactive
+            audio_env = None
+            if use_audio_reactive:
+                with st.spinner("🎵 Analisi audio..."):
+                    _tmp_wav = extract_audio(video_path)
+                    if _tmp_wav:
+                        cap_ar = cv2.VideoCapture(video_path)
+                        _fps_ar = cap_ar.get(cv2.CAP_PROP_FPS) or 24
+                        _tot_ar = int(cap_ar.get(cv2.CAP_PROP_FRAME_COUNT))
+                        cap_ar.release()
+                        audio_env = analyze_audio_for_video(_tmp_wav, _fps_ar, _tot_ar)
+                        try: os.unlink(_tmp_wav)
+                        except: pass
+
+            # Gestione sorgente audio esterna
+            audio_source_path = None
+            if audio_mode in ("3_esterno","4_esterno_distruggi") and uploaded_audio_inline is not None:
+                ext = os.path.splitext(uploaded_audio_inline.name)[1].lower()
+                fd_as, audio_source_path = tempfile.mkstemp(suffix=ext)
+                os.close(fd_as)
+                with open(audio_source_path,'wb') as f:
+                    f.write(uploaded_audio_inline.read())
+
+            # Mappa le nuove modalità audio alle chiavi attese da process_video
+            _mode_map = {
+                "0_originale":        "0_originale",
+                "2_distruggi":        "2_distruggi",
+                "1_mix":              "2_distruggi",   # mix: distruggi poi mixiamo sotto
+                "3_esterno":          "1_carica",
+                "4_esterno_distruggi":"1_carica",
+            }
+            _process_audio_mode = _mode_map.get(audio_mode, "0_originale")
+
+            result_path = process_video(video_path, effect_type, params, max_frames,
+                                        _process_audio_mode, kf_envelope, audio_params_override,
+                                        aspect_ratio, audio_source_path,
+                                        audio_env, ar_intensity)
+
+            if result_path:
+                st.success("✅ Video processato!")
+
+                # Mix post-processing: se modalità 1_mix, combina video glitch + audio originale a 50%
+                if audio_mode == "1_mix" and ffmpeg_available:
+                    fd_mix, mix_path = tempfile.mkstemp(suffix='_mix.mp4')
+                    os.close(fd_mix)
+                    # Combina audio originale (volume 0.5) + audio glitchato (volume 0.5)
+                    r_mix = subprocess.run([
+                        'ffmpeg', '-i', result_path, '-i', video_path,
+                        '-filter_complex',
+                        '[0:a]volume=0.5[a0];[1:a]volume=0.5[a1];[a0][a1]amix=inputs=2:duration=shortest[aout]',
+                        '-map','0:v:0','-map','[aout]',
+                        '-c:v','copy','-c:a','aac',
+                        mix_path,'-y'
+                    ], capture_output=True, text=True)
+                    if r_mix.returncode == 0:
+                        try: os.unlink(result_path)
+                        except: pass
+                        result_path = mix_path
+
+                with st.spinner("🗜️ H.264..."):
+                    h264_path = recompress_h264(result_path, aspect_ratio)
+
+                orig_size  = get_file_size_mb(video_path)
+                fps_v, w_v, h_v, frames_v, dur_v = get_video_info(video_path)
+                out_size   = get_file_size_mb(h264_path)
+
+                video_stem   = os.path.splitext(uploaded_file.name)[0]
+                effect_label = {
+                    "pixel_sort":"PixelSort","channel_shift":"ChannelShift",
+                    "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
+                    "slice_shift":"SliceShift","echo_smear":"EchoSmear",
+                    "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
+                    "color_quantize":"ColorQuantize","moire":"Moire",
+                    "feedback_loop":"FeedbackLoop","pixel_drift":"PixelDrift",
+                    "slit_scan":"SlitScan","thermal":"Thermal",
+                    "ascii_glitch":"AsciiGlitch","halftone":"Halftone",
+                    "chroma_pulse":"ChromaPulse",
+                    "vhs":"VHS","distruttivo":"Distruttivo","noise":"Noise",
+                    "combined":"Combinato","broken_tv":"BrokenTV","random":"Random"
+                }.get(effect_type, effect_type)
+                output_video_name = f"{video_stem}_{effect_label}.mp4"
+                report_name       = f"{video_stem}_{effect_label}.txt"
+
+                st.session_state.report_data = build_report(
+                    uploaded_file.name, orig_size, out_size,
+                    fps_v, w_v, h_v, frames_v, dur_v,
+                    effect_type, params, audio_mode != "0_originale", kf_df
+                )
+                st.session_state.h264_path         = h264_path
+                st.session_state.output_video_name = output_video_name
+                st.session_state.orig_filename     = uploaded_file.name
+                st.session_state.report_filename   = report_name
+                st.session_state.video_ready       = True
+
+                for p in [result_path, video_path]:
+                    try: os.unlink(p)
+                    except: pass
+            else:
+                st.error("❌ Errore durante il processing.")
 
 else:
     st.info("👆 Carica un video per iniziare!")
-
-# --- AUDIO STANDALONE GLITCH (fuori dall'if video) ---
-if uploaded_audio_file is not None and check_ffmpeg():
-    st.markdown("---")
-    st.subheader("🎵 Glitch Audio Standalone")
-    
-    ffmpeg_available = check_ffmpeg()
-    audio_effect = st.selectbox(
-        "Effetto audio:",
-        ["vhs", "distruttivo", "noise", "broken_tv"],
-        format_func=lambda x: {"vhs":"📼 VHS","distruttivo":"💥 Distruttivo","noise":"📺 Noise","broken_tv":"📻 Broken TV"}[x],
-        key="audio_effect_sel"
-    )
-    col1, col2, col3 = st.columns(3)
-    with col1: a_p1 = st.slider("Param 1", 0.1, 3.0, 1.0, 0.1, key="a_p1")
-    with col2: a_p2 = st.slider("Param 2", 0.1, 3.0, 1.0, 0.1, key="a_p2")
-    with col3: a_p3 = st.slider("Param 3", 0.1, 3.0, 1.0, 0.1, key="a_p3")
-
-    if st.button("🔊 Glitcha Audio"):
-        with st.spinner("Glitchando audio..."):
-            ext = os.path.splitext(uploaded_audio_file.name)[1].lower()
-            fd_ain, audio_in_path = tempfile.mkstemp(suffix=ext)
-            os.close(fd_ain)
-            with open(audio_in_path, 'wb') as f:
-                f.write(uploaded_audio_file.read())
-            
-            # Converti in WAV per processing
-            wav_path = convert_audio_to_wav(audio_in_path)
-            if wav_path:
-                glitched_wav = process_audio_glitch(wav_path, audio_effect, (a_p1, a_p2, a_p3))
-                if glitched_wav:
-                    # Converti in mp3 per output leggero
-                    fd_out, mp3_out = tempfile.mkstemp(suffix='_glitch.mp3')
-                    os.close(fd_out)
-                    subprocess.run([
-                        'ffmpeg', '-i', glitched_wav,
-                        '-codec:a', 'libmp3lame', '-qscale:a', '4',
-                        mp3_out, '-y'
-                    ], capture_output=True)
-                    st.session_state.glitched_audio_path = mp3_out
-                    st.session_state.glitched_audio_name = uploaded_audio_file.name
-                    # Pulizia temp
-                    for p in [audio_in_path, wav_path, glitched_wav]:
-                        try: os.unlink(p)
-                        except: pass
-                    st.success("✅ Audio glitchato!")
-
-    if st.session_state.glitched_audio_path and os.path.exists(st.session_state.glitched_audio_path):
-        st.audio(st.session_state.glitched_audio_path)
-        with open(st.session_state.glitched_audio_path, 'rb') as af:
-            orig_stem = os.path.splitext(st.session_state.get('glitched_audio_name', 'audio'))[0]
-            st.download_button("📥 Scarica Audio Glitch (mp3)", af,
-                file_name=f"glitch_{orig_stem}.mp3", mime="audio/mpeg", key="down_audio")
 
 # RISULTATI PERSISTENTI
 if st.session_state.video_ready:
@@ -2075,7 +1898,7 @@ if st.session_state.video_ready:
     c_d1, c_d2 = st.columns(2)
     with c_d1:
         if st.session_state.h264_path and os.path.exists(st.session_state.h264_path):
-            with open(st.session_state.h264_path, 'rb') as vf:
+            with open(st.session_state.h264_path,'rb') as vf:
                 st.download_button(
                     label="📥 Scarica video (H.264)",
                     data=vf,
