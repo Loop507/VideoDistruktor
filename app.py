@@ -80,7 +80,7 @@ def analyze_audio_for_video(audio_path, fps, total_frames):
             'spectral': _pad(centroid),
         }
     except Exception as e:
-        # Fallback: tutti a 0.5
+        # Fallback silenzioso: tutti a 0.5 — l'errore non è critico
         flat = np.full(total_frames, 0.5, dtype=np.float32)
         return {'rms': flat, 'beats': np.zeros(total_frames, dtype=np.float32),
                 'low_freq': flat.copy(), 'high_freq': flat.copy(), 'spectral': flat.copy()}
@@ -170,7 +170,7 @@ def pil_to_frame(pil_img):
     return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 # --- Funzioni degli effetti audio ---
-def extract_audio(video_path):
+def extract_audio(video_path, silent=False):
     """Estrae l'audio dal video usando ffmpeg e lo converte in WAV 44100Hz stereo"""
     fd, audio_path = tempfile.mkstemp(suffix='.wav')
     os.close(fd)
@@ -178,11 +178,15 @@ def extract_audio(video_path):
         cmd = ['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', audio_path, '-y']
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            st.warning("⚠️ Impossibile estrarre l'audio. Il video potrebbe non avere traccia audio.")
+            if not silent:
+                st.warning("⚠️ Impossibile estrarre l'audio. Il video potrebbe non avere traccia audio.")
+            try: os.unlink(audio_path)
+            except: pass
             return None
         return audio_path
     except Exception as e:
-        st.warning(f"⚠️ Errore nell'estrazione audio: {e}")
+        if not silent:
+            st.warning(f"⚠️ Errore nell'estrazione audio: {e}")
         return None
 
 def convert_audio_to_wav(audio_path_in):
@@ -1032,9 +1036,81 @@ def interpolate_keyframes(keyframes_df, fps, total_frames):
     except Exception:
         return None
 
+def build_mask(h, w, mask_type, mask_x, mask_y, mask_w, mask_h, feather=0, reverse=False):
+    """
+    Genera una maschera float32 (0.0–1.0) dove 1.0 = effetto attivo.
+    mask_type : 'striscia_h' | 'striscia_v' | 'cerchio' | 'rettangolo' | 'nessuna'
+    mask_x/y  : posizione centro (0.0–1.0 relativa al frame)
+    mask_w/h  : dimensione (0.0–1.0 relativa al frame)
+    feather   : pixel di sfumatura ai bordi
+    reverse   : se True, inverte la maschera (effetto fuori, originale dentro)
+    """
+    mask = np.zeros((h, w), dtype=np.float32)
+
+    cx = int(np.clip(mask_x, 0.0, 1.0) * w)
+    cy = int(np.clip(mask_y, 0.0, 1.0) * h)
+    mw = max(2, int(np.clip(mask_w, 0.01, 1.0) * w))
+    mh = max(2, int(np.clip(mask_h, 0.01, 1.0) * h))
+
+    if mask_type == 'striscia_h':
+        y0 = max(0, cy - mh // 2)
+        y1 = min(h, cy + mh // 2)
+        mask[y0:y1, :] = 1.0
+
+    elif mask_type == 'striscia_v':
+        x0 = max(0, cx - mw // 2)
+        x1 = min(w, cx + mw // 2)
+        mask[:, x0:x1] = 1.0
+
+    elif mask_type == 'rettangolo':
+        x0 = max(0, cx - mw // 2)
+        x1 = min(w, cx + mw // 2)
+        y0 = max(0, cy - mh // 2)
+        y1 = min(h, cy + mh // 2)
+        mask[y0:y1, x0:x1] = 1.0
+
+    elif mask_type == 'cerchio':
+        ys = np.arange(h, dtype=np.float32)
+        xs = np.arange(w, dtype=np.float32)
+        xx, yy = np.meshgrid(xs, ys)
+        # ellisse: normalizza per avere cerchio vero in pixel space
+        rx = max(1, mw / 2)
+        ry = max(1, mh / 2)
+        dist = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2
+        mask[dist <= 1.0] = 1.0
+
+    elif mask_type == 'nessuna':
+        mask[:] = 1.0
+        if reverse:
+            return np.zeros((h, w), dtype=np.float32)
+        return mask
+
+    # Feathering con GaussianBlur
+    if feather > 1:
+        ksize = feather * 2 + 1
+        mask = cv2.GaussianBlur(mask, (ksize, ksize), feather * 0.5)
+
+    if reverse:
+        mask = 1.0 - mask
+
+    return mask
+
+
+def apply_mask_blend(original, processed, mask):
+    """
+    Blend originale e processato usando la maschera.
+    mask float32 (h,w): 1.0 = prendi processed, 0.0 = prendi original
+    """
+    m = mask[:, :, np.newaxis]  # (h, w, 1) per broadcasting su 3 canali
+    blended = (processed.astype(np.float32) * m + original.astype(np.float32) * (1.0 - m))
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
 def process_video(video_path, effect_type, params, max_frames=None, audio_mode="0_originale",
                   kf_envelope=None, audio_params_override=None, aspect_ratio="Originale",
-                  audio_source_path=None, audio_env=None, ar_intensity=0.0):
+                  audio_source_path=None, audio_env=None, ar_intensity=0.0,
+                  mask_type="nessuna", mask_x=0.5, mask_y=0.5, mask_w=1.0, mask_h=0.3,
+                  mask_feather=0, mask_reverse=False):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         st.error("❌ Impossibile aprire il video.")
@@ -1070,6 +1146,10 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
         SLIT_BUF_LEN = 30
         progress_bar = st.progress(0)
         status_text  = st.empty()
+
+        # Costruisce la maschera una volta sola (stessa per tutti i frame)
+        glitch_mask = build_mask(out_h, out_w, mask_type, mask_x, mask_y,
+                                 mask_w, mask_h, mask_feather, mask_reverse)
 
         def apply_effect(frame, prev_frame, frame_count):
             cp = params
@@ -1148,13 +1228,21 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
             # Crop/resize al formato target
             if aspect_ratio in TARGET_SIZES:
                 ph, pw = processed.shape[:2]
-                # resize mantenendo aspect ratio, poi crop centrato
                 scale = max(out_w / pw, out_h / ph)
                 rw, rh = int(pw * scale), int(ph * scale)
                 resized = cv2.resize(processed, (rw, rh), interpolation=cv2.INTER_LANCZOS4)
                 cx = (rw - out_w) // 2
                 cy = (rh - out_h) // 2
                 processed = resized[cy:cy+out_h, cx:cx+out_w]
+                # Resize anche frame originale per il blend maschera
+                orig_resized = cv2.resize(frame, (rw, rh), interpolation=cv2.INTER_LANCZOS4)
+                orig_cropped = orig_resized[cy:cy+out_h, cx:cx+out_w]
+            else:
+                orig_cropped = frame if frame.shape[:2] == (out_h, out_w) else cv2.resize(frame, (out_w, out_h))
+
+            # Applica maschera (nessuna = passa tutto, altrimenti blend)
+            if mask_type != 'nessuna':
+                processed = apply_mask_blend(orig_cropped, processed, glitch_mask)
 
             out.write(processed)
             frame_count += 1
@@ -1698,6 +1786,45 @@ if uploaded_file is not None:
         max_frames = st.number_input("🎬 Limite frame (0=nessun limite)",
             min_value=0, max_value=10000, value=0)
 
+        st.markdown("---")
+
+        # ── MASCHERA EFFETTO ─────────────────────────────────────
+        st.markdown("**🎭 Maschera effetto**")
+        mask_type = st.selectbox("Forma maschera:", 
+            ["nessuna","striscia_h","striscia_v","rettangolo","cerchio"],
+            format_func=lambda x: {
+                "nessuna":    "⬛ Nessuna (effetto su tutto il frame)",
+                "striscia_h": "➖ Striscia orizzontale",
+                "striscia_v": "➕ Striscia verticale",
+                "rettangolo": "▭ Rettangolo",
+                "cerchio":    "⭕ Cerchio / Ellisse",
+            }[x], key="mask_type_sel")
+
+        mask_x, mask_y = 0.5, 0.5
+        mask_w, mask_h = 1.0, 0.3
+        mask_feather = 0
+        mask_reverse = False
+
+        if mask_type != 'nessuna':
+            if mask_type == 'striscia_h':
+                mask_y = st.slider("Posizione verticale (0=alto, 1=basso)", 0.0, 1.0, 0.5, 0.01, key="mk_y")
+                mask_h = st.slider("Altezza striscia", 0.01, 1.0, 0.25, 0.01, key="mk_h")
+                mask_w = 1.0
+            elif mask_type == 'striscia_v':
+                mask_x = st.slider("Posizione orizzontale (0=sx, 1=dx)", 0.0, 1.0, 0.5, 0.01, key="mk_x")
+                mask_w = st.slider("Larghezza striscia", 0.01, 1.0, 0.25, 0.01, key="mk_w")
+                mask_h = 1.0
+            elif mask_type in ('rettangolo','cerchio'):
+                cm1, cm2 = st.columns(2)
+                with cm1: mask_x = st.slider("Centro X", 0.0, 1.0, 0.5, 0.01, key="mk_x")
+                with cm2: mask_y = st.slider("Centro Y", 0.0, 1.0, 0.5, 0.01, key="mk_y")
+                cm3, cm4 = st.columns(2)
+                with cm3: mask_w = st.slider("Larghezza", 0.01, 1.0, 0.5, 0.01, key="mk_w")
+                with cm4: mask_h = st.slider("Altezza", 0.01, 1.0, 0.3, 0.01, key="mk_h")
+
+            mask_feather = st.slider("Sfumatura bordi (px)", 0, 60, 0, 2, key="mk_feather")
+            mask_reverse = st.checkbox("🔄 Inverti maschera (effetto fuori, originale dentro)", key="mk_reverse")
+
         # ── BOTTONE PROCESSA ─────────────────────────────────────
         do_process = st.button("🚀 Processa Video", use_container_width=True)
 
@@ -1771,6 +1898,12 @@ if uploaded_file is not None:
                     pf = _fn[chosen](frame_live, *rp)
                 else:
                     pf = frame_live
+                # Applica maschera anche in anteprima
+                if mask_type != 'nessuna':
+                    h_lv, w_lv = frame_live.shape[:2]
+                    prev_mask = build_mask(h_lv, w_lv, mask_type, mask_x, mask_y,
+                                          mask_w, mask_h, mask_feather, mask_reverse)
+                    pf = apply_mask_blend(frame_live, pf, prev_mask)
                 st.image(cv2.cvtColor(pf, cv2.COLOR_BGR2RGB), use_container_width=True)
         except Exception as e:
             st.caption(f"Anteprima non disponibile: {e}")
@@ -1793,7 +1926,7 @@ if uploaded_file is not None:
             audio_env = None
             if use_audio_reactive:
                 with st.spinner("🎵 Analisi audio..."):
-                    _tmp_wav = extract_audio(video_path)
+                    _tmp_wav = extract_audio(video_path, silent=True)
                     if _tmp_wav:
                         cap_ar = cv2.VideoCapture(video_path)
                         _fps_ar = cap_ar.get(cv2.CAP_PROP_FPS) or 24
@@ -1825,7 +1958,9 @@ if uploaded_file is not None:
             result_path = process_video(video_path, effect_type, params, max_frames,
                                         _process_audio_mode, kf_envelope, audio_params_override,
                                         aspect_ratio, audio_source_path,
-                                        audio_env, ar_intensity)
+                                        audio_env, ar_intensity,
+                                        mask_type, mask_x, mask_y, mask_w, mask_h,
+                                        mask_feather, mask_reverse)
 
             if result_path:
                 st.success("✅ Video processato!")
