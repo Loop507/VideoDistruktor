@@ -1127,6 +1127,32 @@ def build_mask(h, w, mask_type, mask_x, mask_y, mask_w, mask_h, feather=0, rever
     return mask
 
 
+def build_combined_mask(h, w, masks_list):
+    """
+    Combina una lista di maschere con OR logico (np.maximum).
+    masks_list: lista di dict con chiavi:
+        mask_type, mask_x, mask_y, mask_w, mask_h, mask_feather, mask_reverse
+    Ritorna maschera float32 (h, w) combinata.
+    Se masks_list è vuota, ritorna maschera di zeri (nessun effetto).
+    """
+    if not masks_list:
+        return np.zeros((h, w), dtype=np.float32)
+    combined = np.zeros((h, w), dtype=np.float32)
+    for m in masks_list:
+        single = build_mask(
+            h, w,
+            m.get('mask_type', 'nessuna'),
+            m.get('mask_x', 0.5),
+            m.get('mask_y', 0.5),
+            m.get('mask_w', 1.0),
+            m.get('mask_h', 0.3),
+            m.get('mask_feather', 0),
+            m.get('mask_reverse', False),
+        )
+        combined = np.maximum(combined, single)
+    return np.clip(combined, 0.0, 1.0)
+
+
 def apply_mask_blend(original, processed, mask):
     """
     Blend originale e processato usando la maschera.
@@ -1142,7 +1168,8 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                   audio_source_path=None, audio_env=None, ar_intensity=0.0,
                   mask_type="nessuna", mask_x=0.5, mask_y=0.5, mask_w=1.0, mask_h=0.3,
                   mask_feather=0, mask_reverse=False,
-                  beat_sync=False, beat_decay=6, beat_intensity=2.0):
+                  beat_sync=False, beat_decay=6, beat_intensity=2.0,
+                  masks_list=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         st.error("❌ Impossibile aprire il video.")
@@ -1179,9 +1206,15 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
         progress_bar = st.progress(0)
         status_text  = st.empty()
 
-        # Costruisce la maschera una volta sola (stessa per tutti i frame)
-        glitch_mask = build_mask(out_h, out_w, mask_type, mask_x, mask_y,
-                                 mask_w, mask_h, mask_feather, mask_reverse)
+        # Costruisce la maschera combinata (multi-maschera o singola per retro-compatibilità)
+        if masks_list is not None and len(masks_list) > 0:
+            glitch_mask = build_combined_mask(out_h, out_w, masks_list)
+            # Determina se applicare la maschera (almeno una non è 'nessuna')
+            _use_mask = any(m.get('mask_type', 'nessuna') != 'nessuna' for m in masks_list)
+        else:
+            glitch_mask = build_mask(out_h, out_w, mask_type, mask_x, mask_y,
+                                     mask_w, mask_h, mask_feather, mask_reverse)
+            _use_mask = mask_type != 'nessuna'
 
         # Beat-sync envelope (solo se attivo e audio_env disponibile)
         beat_env = None
@@ -1287,7 +1320,7 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 orig_cropped = frame if frame.shape[:2] == (out_h, out_w) else cv2.resize(frame, (out_w, out_h))
 
             # Applica maschera (nessuna = passa tutto, altrimenti blend)
-            if mask_type != 'nessuna':
+            if _use_mask:
                 processed = apply_mask_blend(orig_cropped, processed, glitch_mask)
 
             out.write(processed)
@@ -1848,42 +1881,83 @@ if uploaded_file is not None:
 
         st.markdown("---")
 
-        # ── MASCHERA EFFETTO ─────────────────────────────────────
-        st.markdown("**🎭 Maschera effetto**")
-        mask_type = st.selectbox("Forma maschera:", 
-            ["nessuna","striscia_h","striscia_v","rettangolo","cerchio"],
-            format_func=lambda x: {
-                "nessuna":    "⬛ Nessuna (effetto su tutto il frame)",
-                "striscia_h": "➖ Striscia orizzontale",
-                "striscia_v": "➕ Striscia verticale",
-                "rettangolo": "▭ Rettangolo",
-                "cerchio":    "⭕ Cerchio / Ellisse",
-            }[x], key="mask_type_sel")
+        # ── MASCHERA EFFETTO (multi) ──────────────────────────────
+        st.markdown("**🎭 Maschere effetto**")
 
-        mask_x, mask_y = 0.5, 0.5
-        mask_w, mask_h = 1.0, 0.3
-        mask_feather = 0
-        mask_reverse = False
+        # Inizializza lista maschere in session_state
+        if 'masks_list' not in st.session_state:
+            st.session_state.masks_list = []
 
-        if mask_type != 'nessuna':
-            if mask_type == 'striscia_h':
-                mask_y = st.slider("Posizione verticale (0=alto, 1=basso)", 0.0, 1.0, 0.5, 0.01, key="mk_y")
-                mask_h = st.slider("Altezza striscia", 0.01, 1.0, 0.25, 0.01, key="mk_h")
-                mask_w = 1.0
-            elif mask_type == 'striscia_v':
-                mask_x = st.slider("Posizione orizzontale (0=sx, 1=dx)", 0.0, 1.0, 0.5, 0.01, key="mk_x")
-                mask_w = st.slider("Larghezza striscia", 0.01, 1.0, 0.25, 0.01, key="mk_w")
-                mask_h = 1.0
-            elif mask_type in ('rettangolo','cerchio'):
-                cm1, cm2 = st.columns(2)
-                with cm1: mask_x = st.slider("Centro X", 0.0, 1.0, 0.5, 0.01, key="mk_x")
-                with cm2: mask_y = st.slider("Centro Y", 0.0, 1.0, 0.5, 0.01, key="mk_y")
-                cm3, cm4 = st.columns(2)
-                with cm3: mask_w = st.slider("Larghezza", 0.01, 1.0, 0.5, 0.01, key="mk_w")
-                with cm4: mask_h = st.slider("Altezza", 0.01, 1.0, 0.3, 0.01, key="mk_h")
+        # Bottone aggiungi maschera
+        col_ma, col_mb = st.columns([1, 1])
+        with col_ma:
+            if st.button("➕ Aggiungi maschera", use_container_width=True):
+                st.session_state.masks_list.append({
+                    'mask_type': 'striscia_h',
+                    'mask_x': 0.5, 'mask_y': 0.5,
+                    'mask_w': 1.0, 'mask_h': 0.25,
+                    'mask_feather': 0, 'mask_reverse': False,
+                })
+        with col_mb:
+            if st.button("🗑️ Rimuovi tutte", use_container_width=True):
+                st.session_state.masks_list = []
 
-            mask_feather = st.slider("Sfumatura bordi (px)", 0, 60, 0, 2, key="mk_feather")
-            mask_reverse = st.checkbox("🔄 Inverti maschera (effetto fuori, originale dentro)", key="mk_reverse")
+        # Render di ogni maschera
+        masks_to_remove = []
+        for mi, msk in enumerate(st.session_state.masks_list):
+            with st.expander(f"Maschera {mi+1} — {msk['mask_type']}", expanded=True):
+                msk['mask_type'] = st.selectbox(
+                    "Forma", ["striscia_h","striscia_v","rettangolo","cerchio"],
+                    format_func=lambda x: {
+                        "striscia_h": "➖ Striscia H",
+                        "striscia_v": "➕ Striscia V",
+                        "rettangolo": "▭ Rettangolo",
+                        "cerchio":    "⭕ Cerchio",
+                    }[x],
+                    index=["striscia_h","striscia_v","rettangolo","cerchio"].index(msk['mask_type']),
+                    key=f"mtype_{mi}"
+                )
+                if msk['mask_type'] == 'striscia_h':
+                    msk['mask_y'] = st.slider("Pos. verticale", 0.0, 1.0, msk['mask_y'], 0.01, key=f"my_{mi}")
+                    msk['mask_h'] = st.slider("Altezza", 0.01, 1.0, msk['mask_h'], 0.01, key=f"mh_{mi}")
+                    msk['mask_w'] = 1.0
+                elif msk['mask_type'] == 'striscia_v':
+                    msk['mask_x'] = st.slider("Pos. orizzontale", 0.0, 1.0, msk['mask_x'], 0.01, key=f"mx_{mi}")
+                    msk['mask_w'] = st.slider("Larghezza", 0.01, 1.0, msk['mask_w'], 0.01, key=f"mw_{mi}")
+                    msk['mask_h'] = 1.0
+                elif msk['mask_type'] in ('rettangolo','cerchio'):
+                    cm1, cm2 = st.columns(2)
+                    with cm1: msk['mask_x'] = st.slider("Centro X", 0.0, 1.0, msk['mask_x'], 0.01, key=f"mx_{mi}")
+                    with cm2: msk['mask_y'] = st.slider("Centro Y", 0.0, 1.0, msk['mask_y'], 0.01, key=f"my_{mi}")
+                    cm3, cm4 = st.columns(2)
+                    with cm3: msk['mask_w'] = st.slider("Larghezza", 0.01, 1.0, msk['mask_w'], 0.01, key=f"mw_{mi}")
+                    with cm4: msk['mask_h'] = st.slider("Altezza", 0.01, 1.0, msk['mask_h'], 0.01, key=f"mhh_{mi}")
+                msk['mask_feather'] = st.slider("Sfumatura bordi (px)", 0, 60, msk['mask_feather'], 2, key=f"mf_{mi}")
+                msk['mask_reverse'] = st.checkbox("🔄 Inverti", msk['mask_reverse'], key=f"mr_{mi}")
+                if st.button(f"🗑️ Rimuovi maschera {mi+1}", key=f"mdel_{mi}"):
+                    masks_to_remove.append(mi)
+
+        for idx in reversed(masks_to_remove):
+            st.session_state.masks_list.pop(idx)
+
+        # Variabili legacy per retro-compatibilità (anteprima live)
+        masks_list = st.session_state.masks_list
+        # fallback singola maschera per anteprima
+        if masks_list:
+            _m0 = masks_list[0]
+            mask_type    = _m0['mask_type']
+            mask_x       = _m0['mask_x']
+            mask_y       = _m0['mask_y']
+            mask_w       = _m0['mask_w']
+            mask_h       = _m0['mask_h']
+            mask_feather = _m0['mask_feather']
+            mask_reverse = _m0['mask_reverse']
+        else:
+            mask_type    = 'nessuna'
+            mask_x, mask_y = 0.5, 0.5
+            mask_w, mask_h = 1.0, 0.3
+            mask_feather = 0
+            mask_reverse = False
 
         # ── BOTTONE PROCESSA ─────────────────────────────────────
         do_process = st.button("🚀 Processa Video", use_container_width=True)
@@ -1959,7 +2033,11 @@ if uploaded_file is not None:
                 else:
                     pf = frame_live
                 # Applica maschera anche in anteprima
-                if mask_type != 'nessuna':
+                if masks_list:
+                    h_lv, w_lv = frame_live.shape[:2]
+                    prev_mask = build_combined_mask(h_lv, w_lv, masks_list)
+                    pf = apply_mask_blend(frame_live, pf, prev_mask)
+                elif mask_type != 'nessuna':
                     h_lv, w_lv = frame_live.shape[:2]
                     prev_mask = build_mask(h_lv, w_lv, mask_type, mask_x, mask_y,
                                           mask_w, mask_h, mask_feather, mask_reverse)
@@ -2023,7 +2101,8 @@ if uploaded_file is not None:
                                         audio_env, ar_intensity,
                                         mask_type, mask_x, mask_y, mask_w, mask_h,
                                         mask_feather, mask_reverse,
-                                        beat_sync, beat_decay, beat_intensity)
+                                        beat_sync, beat_decay, beat_intensity,
+                                        masks_list=masks_list)
 
             if result_path:
                 st.success("✅ Video processato!")
