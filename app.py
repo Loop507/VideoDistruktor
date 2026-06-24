@@ -1153,6 +1153,63 @@ def build_combined_mask(h, w, masks_list):
     return np.clip(combined, 0.0, 1.0)
 
 
+def interpolate_mask_at_frame(msk, frame_idx, total_frames):
+    """
+    Ritorna una copia del dict maschera con i valori geometrici interpolati
+    al frame corrente, se 'animate_pos' è True.
+    Interpola: mask_y, mask_h (striscia_h), mask_x, mask_w (striscia_v),
+               mask_x, mask_y, mask_w, mask_h (rettangolo/cerchio).
+    """
+    if not msk.get('animate_pos', False):
+        return msk
+    t = float(frame_idx) / max(1, total_frames - 1)  # 0.0 → 1.0
+
+    out = dict(msk)
+    mt = msk.get('mask_type', 'nessuna')
+
+    def lerp(key_s, key_e, fallback):
+        s = msk.get(key_s, fallback)
+        e = msk.get(key_e, fallback)
+        return s + (e - s) * t
+
+    if mt == 'striscia_h':
+        out['mask_y'] = lerp('mask_y_start', 'mask_y_end', msk.get('mask_y', 0.5))
+        out['mask_h'] = lerp('mask_h_start', 'mask_h_end', msk.get('mask_h', 0.25))
+    elif mt == 'striscia_v':
+        out['mask_x'] = lerp('mask_x_start', 'mask_x_end', msk.get('mask_x', 0.5))
+        out['mask_w'] = lerp('mask_w_start', 'mask_w_end', msk.get('mask_w', 0.25))
+    elif mt in ('rettangolo', 'cerchio'):
+        out['mask_x'] = lerp('mask_x_start', 'mask_x_end', msk.get('mask_x', 0.5))
+        out['mask_y'] = lerp('mask_y_start', 'mask_y_end', msk.get('mask_y', 0.5))
+        out['mask_w'] = lerp('mask_w_start', 'mask_w_end', msk.get('mask_w', 0.5))
+        out['mask_h'] = lerp('mask_h_start', 'mask_h_end', msk.get('mask_h', 0.5))
+    return out
+
+
+def build_combined_mask_at_frame(h, w, masks_list, frame_idx=0, total_frames=1):
+    """
+    Come build_combined_mask ma interpola i parametri geometrici per ogni
+    maschera animata prima di costruire la maschera.
+    """
+    if not masks_list:
+        return np.zeros((h, w), dtype=np.float32)
+    combined = np.zeros((h, w), dtype=np.float32)
+    for m in masks_list:
+        mi = interpolate_mask_at_frame(m, frame_idx, total_frames)
+        single = build_mask(
+            h, w,
+            mi.get('mask_type', 'nessuna'),
+            mi.get('mask_x', 0.5),
+            mi.get('mask_y', 0.5),
+            mi.get('mask_w', 1.0),
+            mi.get('mask_h', 0.3),
+            mi.get('mask_feather', 0),
+            mi.get('mask_reverse', False),
+        )
+        combined = np.maximum(combined, single)
+    return np.clip(combined, 0.0, 1.0)
+
+
 def apply_mask_blend(original, processed, mask):
     """
     Blend originale e processato usando la maschera.
@@ -1206,15 +1263,23 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
         progress_bar = st.progress(0)
         status_text  = st.empty()
 
-        # Costruisce la maschera combinata (multi-maschera o singola per retro-compatibilità)
-        if masks_list is not None and len(masks_list) > 0:
-            glitch_mask = build_combined_mask(out_h, out_w, masks_list)
-            # Determina se applicare la maschera (almeno una non è 'nessuna')
+        # Determina se usare il sistema multi-maschera (con eventuale animazione)
+        _use_multi_mask = masks_list is not None and len(masks_list) > 0
+        _use_mask_legacy = not _use_multi_mask and mask_type != 'nessuna'
+
+        if _use_multi_mask:
             _use_mask = any(m.get('mask_type', 'nessuna') != 'nessuna' for m in masks_list)
+            # Determina se almeno una maschera è animata
+            _has_animated_mask = any(m.get('animate_pos', False) for m in masks_list)
+            # Maschera statica pre-calcolata (usata quando nessuna è animata)
+            if not _has_animated_mask:
+                glitch_mask = build_combined_mask(out_h, out_w, masks_list)
         else:
-            glitch_mask = build_mask(out_h, out_w, mask_type, mask_x, mask_y,
-                                     mask_w, mask_h, mask_feather, mask_reverse)
-            _use_mask = mask_type != 'nessuna'
+            _use_mask = _use_mask_legacy
+            _has_animated_mask = False
+            if _use_mask_legacy:
+                glitch_mask = build_mask(out_h, out_w, mask_type, mask_x, mask_y,
+                                         mask_w, mask_h, mask_feather, mask_reverse)
 
         # Beat-sync envelope (solo se attivo e audio_env disponibile)
         beat_env = None
@@ -1321,6 +1386,10 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
 
             # Applica maschera (nessuna = passa tutto, altrimenti blend)
             if _use_mask:
+                if _has_animated_mask:
+                    # Ricalcola la maschera per questo frame con interpolazione geometrica
+                    glitch_mask = build_combined_mask_at_frame(
+                        out_h, out_w, masks_list, frame_count, actual_total_frames)
                 processed = apply_mask_blend(orig_cropped, processed, glitch_mask)
 
             out.write(processed)
@@ -1897,6 +1966,7 @@ if uploaded_file is not None:
                     'mask_x': 0.5, 'mask_y': 0.5,
                     'mask_w': 1.0, 'mask_h': 0.25,
                     'mask_feather': 0, 'mask_reverse': False,
+                    'animate_pos': False,
                 })
         with col_mb:
             if st.button("🗑️ Rimuovi tutte", use_container_width=True):
@@ -1934,6 +2004,95 @@ if uploaded_file is not None:
                     with cm4: msk['mask_h'] = st.slider("Altezza", 0.01, 1.0, msk['mask_h'], 0.01, key=f"mhh_{mi}")
                 msk['mask_feather'] = st.slider("Sfumatura bordi (px)", 0, 60, msk['mask_feather'], 2, key=f"mf_{mi}")
                 msk['mask_reverse'] = st.checkbox("🔄 Inverti", msk['mask_reverse'], key=f"mr_{mi}")
+
+                # ── ANIMAZIONE KEYFRAME MASCHERA ─────────────────────────
+                msk['animate_pos'] = st.toggle(
+                    "🎞️ Anima posizione/dimensione",
+                    value=msk.get('animate_pos', False),
+                    key=f"manim_{mi}",
+                    help="Interpola linearmente posizione e dimensione dall'inizio alla fine del video."
+                )
+                if msk['animate_pos']:
+                    st.caption("**Inizio video → Fine video**")
+                    mt = msk['mask_type']
+                    if mt == 'striscia_h':
+                        ka1, ka2 = st.columns(2)
+                        with ka1:
+                            msk['mask_y_start'] = st.slider(
+                                "Pos. Y — inizio", 0.0, 1.0,
+                                float(msk.get('mask_y_start', msk.get('mask_y', 0.5))),
+                                0.01, key=f"mys_{mi}")
+                            msk['mask_h_start'] = st.slider(
+                                "Altezza — inizio", 0.01, 1.0,
+                                float(msk.get('mask_h_start', msk.get('mask_h', 0.25))),
+                                0.01, key=f"mhs_{mi}")
+                        with ka2:
+                            msk['mask_y_end'] = st.slider(
+                                "Pos. Y — fine", 0.0, 1.0,
+                                float(msk.get('mask_y_end', msk.get('mask_y', 0.5))),
+                                0.01, key=f"mye_{mi}")
+                            msk['mask_h_end'] = st.slider(
+                                "Altezza — fine", 0.01, 1.0,
+                                float(msk.get('mask_h_end', msk.get('mask_h', 0.25))),
+                                0.01, key=f"mhe_{mi}")
+                    elif mt == 'striscia_v':
+                        ka1, ka2 = st.columns(2)
+                        with ka1:
+                            msk['mask_x_start'] = st.slider(
+                                "Pos. X — inizio", 0.0, 1.0,
+                                float(msk.get('mask_x_start', msk.get('mask_x', 0.5))),
+                                0.01, key=f"mxs_{mi}")
+                            msk['mask_w_start'] = st.slider(
+                                "Largh. — inizio", 0.01, 1.0,
+                                float(msk.get('mask_w_start', msk.get('mask_w', 0.25))),
+                                0.01, key=f"mws_{mi}")
+                        with ka2:
+                            msk['mask_x_end'] = st.slider(
+                                "Pos. X — fine", 0.0, 1.0,
+                                float(msk.get('mask_x_end', msk.get('mask_x', 0.5))),
+                                0.01, key=f"mxe_{mi}")
+                            msk['mask_w_end'] = st.slider(
+                                "Largh. — fine", 0.01, 1.0,
+                                float(msk.get('mask_w_end', msk.get('mask_w', 0.25))),
+                                0.01, key=f"mwe_{mi}")
+                    elif mt in ('rettangolo', 'cerchio'):
+                        ka1, ka2 = st.columns(2)
+                        with ka1:
+                            st.caption("Inizio")
+                            msk['mask_x_start'] = st.slider(
+                                "Centro X — inizio", 0.0, 1.0,
+                                float(msk.get('mask_x_start', msk.get('mask_x', 0.5))),
+                                0.01, key=f"mxs_{mi}")
+                            msk['mask_y_start'] = st.slider(
+                                "Centro Y — inizio", 0.0, 1.0,
+                                float(msk.get('mask_y_start', msk.get('mask_y', 0.5))),
+                                0.01, key=f"mys_{mi}")
+                            msk['mask_w_start'] = st.slider(
+                                "Largh. — inizio", 0.01, 1.0,
+                                float(msk.get('mask_w_start', msk.get('mask_w', 0.5))),
+                                0.01, key=f"mws_{mi}")
+                            msk['mask_h_start'] = st.slider(
+                                "Altezza — inizio", 0.01, 1.0,
+                                float(msk.get('mask_h_start', msk.get('mask_h', 0.5))),
+                                0.01, key=f"mhs_{mi}")
+                        with ka2:
+                            st.caption("Fine")
+                            msk['mask_x_end'] = st.slider(
+                                "Centro X — fine", 0.0, 1.0,
+                                float(msk.get('mask_x_end', msk.get('mask_x', 0.5))),
+                                0.01, key=f"mxe_{mi}")
+                            msk['mask_y_end'] = st.slider(
+                                "Centro Y — fine", 0.0, 1.0,
+                                float(msk.get('mask_y_end', msk.get('mask_y', 0.5))),
+                                0.01, key=f"mye_{mi}")
+                            msk['mask_w_end'] = st.slider(
+                                "Largh. — fine", 0.01, 1.0,
+                                float(msk.get('mask_w_end', msk.get('mask_w', 0.5))),
+                                0.01, key=f"mwe_{mi}")
+                            msk['mask_h_end'] = st.slider(
+                                "Altezza — fine", 0.01, 1.0,
+                                float(msk.get('mask_h_end', msk.get('mask_h', 0.5))),
+                                0.01, key=f"mhe_{mi}")
                 if st.button(f"🗑️ Rimuovi maschera {mi+1}", key=f"mdel_{mi}"):
                     masks_to_remove.append(mi)
 
