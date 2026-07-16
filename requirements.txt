@@ -1,8 +1,9 @@
-streamlit
-numpy
-Pillow
-opencv-python-headless
-scipy
-librosa
-soundfile
-ffmpeg-python
+streamlit==1.59.2
+numpy==2.4.6
+Pillow==12.3.0
+opencv-python-headless==4.10.0.84
+scipy==1.18.0
+librosa==0.11.0
+soundfile==0.14.0
+ffmpeg-python==0.2.0
+pyarrow<25
