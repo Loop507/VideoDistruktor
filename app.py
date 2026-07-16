@@ -1874,6 +1874,58 @@ def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio,
     return final_path
 
 
+def apply_effect_preview(frame, effect_type, params):
+    """Applica un effetto a UN SINGOLO frame per anteprima statica (usa se stesso come prev_frame)."""
+    try:
+        if effect_type == 'combined':
+            pf = frame.copy()
+            if params.get("apply_vhs"):
+                pf = glitch_vhs_frame(pf, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
+            if params.get("apply_distruttivo"):
+                pf = glitch_distruttivo_frame(pf, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+            if params.get("apply_noise"):
+                pf = glitch_noise_frame(pf, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
+            if params.get("apply_broken_tv"):
+                pf = glitch_broken_tv_frame(pf, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
+            return pf
+        if effect_type == 'random':
+            rl = params[0] if params else 1.0
+            chosen = random.choice(['pixel_sort','channel_shift','byte_corrupt','slice_shift','vhs','broken_tv','noise','distruttivo'])
+            rp = tuple(random.uniform(0.5, 1.5) * rl for _ in range(3))
+            fn = {'pixel_sort':glitch_pixel_sort,'channel_shift':glitch_channel_shift,'byte_corrupt':glitch_byte_corrupt,
+                  'slice_shift':glitch_slice_shift,'vhs':glitch_vhs_frame,'broken_tv':glitch_broken_tv_frame,
+                  'noise':glitch_noise_frame,'distruttivo':glitch_distruttivo_frame}
+            return fn[chosen](frame, *rp)
+        fn_map = {
+            'pixel_sort':    lambda f: glitch_pixel_sort(f, *params),
+            'channel_shift': lambda f: glitch_channel_shift(f, *params),
+            'datamosh':      lambda f: glitch_datamosh(f, f, *params),
+            'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *params),
+            'slice_shift':   lambda f: glitch_slice_shift(f, *params),
+            'echo_smear':    lambda f: glitch_echo_smear(f, f, *params),
+            'rgb_wave':      lambda f: glitch_rgb_wave(f, *params),
+            'mirror_blocks': lambda f: glitch_mirror_blocks(f, *params),
+            'color_quantize':lambda f: glitch_color_quantize(f, *params),
+            'moire':         lambda f: glitch_moire(f, *params),
+            'feedback_loop': lambda f: glitch_feedback_loop(f, f, *params),
+            'pixel_drift':   lambda f: glitch_pixel_drift(f, *params),
+            'slit_scan':     lambda f: glitch_slit_scan(f, [f], *params),
+            'thermal':       lambda f: glitch_thermal(f, *params),
+            'ascii_glitch':  lambda f: glitch_ascii_glitch(f, *params),
+            'halftone':      lambda f: glitch_halftone(f, *params),
+            'chroma_pulse':  lambda f: glitch_chroma_pulse(f, *params, _frame_idx=0),
+            'vhs':           lambda f: glitch_vhs_frame(f, *params),
+            'distruttivo':   lambda f: glitch_distruttivo_frame(f, *params),
+            'noise':         lambda f: glitch_noise_frame(f, *params),
+            'broken_tv':     lambda f: glitch_broken_tv_frame(f, *params),
+        }
+        if effect_type in fn_map:
+            return fn_map[effect_type](frame)
+        return frame
+    except Exception:
+        return frame
+
+
 def render_session_mode():
     if "session_clip_settings" not in st.session_state:
         st.session_state.session_clip_settings = []
@@ -1897,43 +1949,77 @@ def render_session_mode():
         st.info("Carica almeno 2 video per iniziare a montare la sessione.")
         return
 
-    st.markdown(f"**{len(clips_cfg)} clip in coda**")
+    st.markdown("#### 🌐 Effetto globale (usato dalle clip in modalità Globale)")
+    global_effect, global_params = render_mini_effect_picker("session_global")
+
+    st.markdown(f"#### 🎞️ {len(clips_cfg)} clip in coda")
     for i, entry in enumerate(clips_cfg):
         with st.container(border=True):
-            top = st.columns([6, 1, 1])
-            top[0].markdown(f"**{i+1}. {entry['name']}**")
-            if top[1].button("⬆️", key=f"up_{entry['key']}", disabled=(i == 0)):
-                clips_cfg[i-1], clips_cfg[i] = clips_cfg[i], clips_cfg[i-1]
-                st.rerun()
-            if top[2].button("⬇️", key=f"down_{entry['key']}", disabled=(i == len(clips_cfg)-1)):
-                clips_cfg[i+1], clips_cfg[i] = clips_cfg[i], clips_cfg[i+1]
-                st.rerun()
+            main_col, prev_col = st.columns([3, 1])
 
-            mode_choice = st.radio("Effetto per questa clip", ["🌐 Globale", "🎛️ Individuale"],
-                                   index=0 if entry.get("mode", "globale") == "globale" else 1,
-                                   horizontal=True, key=f"mode_{entry['key']}")
-            entry["mode"] = "globale" if mode_choice == "🌐 Globale" else "individuale"
-            if entry["mode"] == "individuale":
-                eff, prm = render_mini_effect_picker(f"ind_{entry['key']}")
-                entry["effect_type"], entry["params"] = eff, prm
+            with main_col:
+                top = st.columns([6, 1, 1])
+                top[0].markdown(f"**{i+1}. {entry['name']}**")
+                if top[1].button("⬆️", key=f"up_{entry['key']}", disabled=(i == 0)):
+                    clips_cfg[i-1], clips_cfg[i] = clips_cfg[i], clips_cfg[i-1]
+                    st.rerun()
+                if top[2].button("⬇️", key=f"down_{entry['key']}", disabled=(i == len(clips_cfg)-1)):
+                    clips_cfg[i+1], clips_cfg[i] = clips_cfg[i], clips_cfg[i+1]
+                    st.rerun()
 
-            if i < len(clips_cfg) - 1:
-                cx1, cx2 = st.columns(2)
-                with cx1:
-                    entry["crossfade_dur"] = st.slider(f"↔️ Crossfade verso clip {i+2} (sec)", 0.2, 3.0,
-                                                       entry.get("crossfade_dur", 1.0), 0.1,
-                                                       key=f"xf_{entry['key']}")
-                with cx2:
-                    entry["transition_type"] = st.selectbox("Tipo transizione", SESSION_TRANSITIONS,
-                                                            key=f"tt_{entry['key']}")
+                mode_choice = st.radio("Effetto per questa clip", ["🌐 Globale", "🎛️ Individuale"],
+                                       index=0 if entry.get("mode", "globale") == "globale" else 1,
+                                       horizontal=True, key=f"mode_{entry['key']}")
+                entry["mode"] = "globale" if mode_choice == "🌐 Globale" else "individuale"
+                if entry["mode"] == "individuale":
+                    eff, prm = render_mini_effect_picker(f"ind_{entry['key']}")
+                    entry["effect_type"], entry["params"] = eff, prm
 
-    st.markdown("#### 🌐 Effetto globale (per le clip in modalità Globale)")
-    global_effect, global_params = render_mini_effect_picker("session_global")
+                if i < len(clips_cfg) - 1:
+                    cx1, cx2 = st.columns(2)
+                    with cx1:
+                        entry["crossfade_dur"] = st.slider(f"↔️ Crossfade verso clip {i+2} (sec)", 0.2, 3.0,
+                                                           entry.get("crossfade_dur", 1.0), 0.1,
+                                                           key=f"xf_{entry['key']}")
+                    with cx2:
+                        entry["transition_type"] = st.selectbox("Tipo transizione", SESSION_TRANSITIONS,
+                                                                key=f"tt_{entry['key']}")
+
+            with prev_col:
+                eff_for_preview = entry.get("effect_type", global_effect) if entry.get("mode") == "individuale" else global_effect
+                prm_for_preview = entry.get("params", global_params) if entry.get("mode") == "individuale" else global_params
+                try:
+                    prev_tmp = os.path.join(tempfile.gettempdir(), f"sess_prev_{entry['key']}.mp4")
+                    if not os.path.exists(prev_tmp):
+                        with open(prev_tmp, "wb") as f:
+                            f.write(entry["file"].getbuffer())
+                    cap_p = cv2.VideoCapture(prev_tmp)
+                    tot_p = int(cap_p.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap_p.set(cv2.CAP_PROP_POS_FRAMES, max(0, tot_p // 3))
+                    ok_p, frame_p = cap_p.read()
+                    cap_p.release()
+                    if ok_p:
+                        thumb = apply_effect_preview(frame_p, eff_for_preview, prm_for_preview)
+                        h_p, w_p = thumb.shape[:2]
+                        new_w = 220
+                        new_h = int(h_p * (new_w / w_p))
+                        thumb_small = cv2.resize(thumb, (new_w, new_h))
+                        st.image(cv2.cvtColor(thumb_small, cv2.COLOR_BGR2RGB), caption="anteprima")
+                except Exception as e:
+                    st.caption(f"Anteprima non disp.: {e}")
 
     st.markdown("#### ⚙️ Impostazioni sessione")
     sc1, sc2, sc3 = st.columns(3)
     with sc1:
-        session_aspect = st.selectbox("Formato output", ["16:9", "9:16", "1:1", "Originale"], key="session_aspect")
+        session_aspect = st.selectbox("Risoluzione finale (dopo il montaggio)",
+                                      ["16:9", "9:16", "1:1", "Originale"],
+                                      format_func=lambda x: {
+                                          "16:9": "16:9 — 1280×720",
+                                          "9:16": "9:16 — 720×1280",
+                                          "1:1":  "1:1 — 720×720",
+                                          "Originale": "Originale (nativa, senza crop)"
+                                      }[x],
+                                      key="session_aspect")
     with sc2:
         session_fps = st.selectbox("FPS sessione", [24, 25, 30], key="session_fps")
     with sc3:
