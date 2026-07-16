@@ -1666,6 +1666,296 @@ def build_report(original_name, original_size_mb, output_size_mb,
     return report
 
 
+# ─────────────────────────────────────────────────────────────────
+# 🎞️ SESSIONE MULTI-CLIP — montaggio con crossfade tra più video
+# ─────────────────────────────────────────────────────────────────
+SESSION_EFFECT_PARAM_SPEC = {
+    # effetto: [(label, min, max, default, step), ...] — stessi valori della UI video-singolo
+    'pixel_sort':    [("Intensità",0.1,3.0,1.0,0.1), ("Soglia luma",0.1,1.0,0.5,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
+    'channel_shift': [("Intensità",0.1,3.0,1.0,0.1), ("Spread",0.1,3.0,1.0,0.1), ("Verticale",0.0,1.0,0.3,0.05)],
+    'datamosh':      [("Intensità",0.1,3.0,1.0,0.1), ("Block size",0.1,3.0,1.0,0.1), ("Chaos",0.1,3.0,1.0,0.1)],
+    'byte_corrupt':  [("Intensità",0.1,3.0,1.0,0.1), ("Chunk size",0.1,3.0,1.0,0.1), ("Random",0.0,1.0,0.7,0.05)],
+    'slice_shift':   [("Intensità",0.1,3.0,1.0,0.1), ("Num slices",0.1,3.0,1.0,0.1), ("Drift",0.1,3.0,1.0,0.1)],
+    'echo_smear':    [("Intensità",0.1,3.0,1.0,0.1), ("Decay",0.0,1.0,0.5,0.05), ("Smear",0.1,3.0,1.0,0.1)],
+    'rgb_wave':      [("Intensità",0.1,3.0,1.0,0.1), ("Frequenza",0.1,5.0,1.0,0.1), ("Phase chaos",0.0,1.0,0.5,0.05)],
+    'mirror_blocks': [("Intensità",0.1,3.0,1.0,0.1), ("Block size",0.1,3.0,1.0,0.1), ("Flip prob",0.0,1.0,0.5,0.05)],
+    'color_quantize':[("Intensità",0.1,3.0,1.0,0.1), ("Livelli",0.1,3.0,1.0,0.1), ("Dither",0.0,1.0,0.5,0.05)],
+    'moire':         [("Intensità",0.1,3.0,1.0,0.1), ("Frequenza",0.1,5.0,1.0,0.1), ("Angolo",0.0,1.0,0.5,0.05)],
+    'feedback_loop': [("Intensità",0.1,3.0,1.0,0.1), ("Zoom",0.0,1.0,0.5,0.05), ("Rotazione",0.0,1.0,0.5,0.05)],
+    'pixel_drift':   [("Intensità",0.1,3.0,1.0,0.1), ("Drift speed",0.1,3.0,1.0,0.1), ("Turbolenza",0.0,1.0,0.5,0.05)],
+    'slit_scan':     [("Intensità",0.1,3.0,1.0,0.1), ("Speed",0.1,3.0,1.0,0.1), ("Tilt",0.0,1.0,0.5,0.05)],
+    'thermal':       [("Intensità",0.1,3.0,1.0,0.1), ("Noise sensore",0.0,1.0,0.5,0.05), ("Aberrazione",0.0,1.0,0.5,0.05)],
+    'ascii_glitch':  [("Intensità",0.1,3.0,1.0,0.1), ("Block size",0.1,1.0,0.5,0.05), ("Chaos",0.0,1.0,0.5,0.05)],
+    'halftone':      [("Intensità",0.1,3.0,1.0,0.1), ("Dot size",0.1,1.0,0.5,0.05), ("Angolo",0.0,1.0,0.3,0.05)],
+    'chroma_pulse':  [("Intensità",0.1,3.0,1.0,0.1), ("Radiale",0.0,1.0,0.5,0.05), ("Pulse speed",0.1,3.0,1.0,0.1)],
+    'vhs':           [("Intensità",0.1,3.0,1.0,0.1), ("Scanline",0.1,3.0,1.0,0.1), ("Color shift",0.1,3.0,1.0,0.1)],
+    'distruttivo':   [("Block size",0.1,3.0,1.0,0.1), ("Num blocks",0.1,3.0,1.0,0.1), ("Displacement",0.1,3.0,1.0,0.1)],
+    'noise':         [("Intensità",0.1,3.0,1.0,0.1), ("Coverage",0.1,3.0,1.0,0.1), ("Chaos",0.1,3.0,1.0,0.1)],
+    'broken_tv':     [("Shift",0.1,3.0,1.0,0.1), ("Line height",0.1,3.0,1.0,0.1), ("Flicker",0.1,3.0,1.0,0.1)],
+}
+SESSION_EFFECTS = list(SESSION_EFFECT_PARAM_SPEC.keys()) + ['combined', 'random']
+SESSION_EFFECT_LABELS = {
+    "pixel_sort":"🔀 Pixel Sort", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
+    "byte_corrupt":"🦠 Byte Corrupt", "slice_shift":"✂️ Slice Shift", "echo_smear":"👻 Echo Smear",
+    "rgb_wave":"🌊 RGB Wave", "mirror_blocks":"🪞 Mirror Blocks", "color_quantize":"🎨 Color Quantize",
+    "moire":"🕸️ Moiré Pattern", "feedback_loop":"🔁 Feedback Loop", "pixel_drift":"💧 Pixel Drift",
+    "slit_scan":"📷 Slit Scan", "thermal":"🌡️ Thermal Vision", "ascii_glitch":"⌨️ ASCII Glitch",
+    "halftone":"🔵 Halftone Destroy", "chroma_pulse":"💥 Chroma Pulse", "vhs":"📼 VHS",
+    "broken_tv":"📻 Broken TV", "noise":"📺 Noise", "distruttivo":"💥 Distruttivo",
+    "combined":"🌟 Combinato", "random":"🎲 Random"
+}
+SESSION_TRANSITIONS = ["fade", "fadeblack", "wipeleft", "wiperight", "circleopen", "pixelize"]
+SESSION_TARGET_SIZES = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
+
+
+def render_mini_effect_picker(key_prefix, default_effect="vhs"):
+    """Selettore effetto (usato per l'effetto globale e per gli effetti individuali per-clip).
+    Copre TUTTI gli effetti disponibili nel motore, non solo i 5 base."""
+    effect = st.selectbox("Effetto", SESSION_EFFECTS, format_func=lambda x: SESSION_EFFECT_LABELS[x],
+                          index=SESSION_EFFECTS.index(default_effect), key=f"{key_prefix}_efftype")
+
+    if effect in SESSION_EFFECT_PARAM_SPEC:
+        spec = SESSION_EFFECT_PARAM_SPEC[effect]
+        cols = st.columns(len(spec))
+        vals = []
+        for i, (label, mn, mx, dft, step) in enumerate(spec):
+            with cols[i]:
+                vals.append(st.slider(label, mn, mx, dft, step, key=f"{key_prefix}_p{i}"))
+        params = tuple(vals)
+
+    elif effect == 'combined':
+        st.caption("Seleziona gli effetti da combinare:")
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        with cc1: apply_vhs = st.checkbox("📼 VHS", value=True, key=f"{key_prefix}_cvhs")
+        with cc2: apply_dst = st.checkbox("💥 Distr.", value=True, key=f"{key_prefix}_cdst")
+        with cc3: apply_nse = st.checkbox("📺 Noise", value=True, key=f"{key_prefix}_cnse")
+        with cc4: apply_tv  = st.checkbox("📻 TV", value=True, key=f"{key_prefix}_ctv")
+        params = {"apply_vhs": apply_vhs, "apply_distruttivo": apply_dst,
+                  "apply_noise": apply_nse, "apply_broken_tv": apply_tv}
+        if apply_vhs:
+            c1,c2,c3 = st.columns(3)
+            with c1: params["vhs_intensity"]    = st.slider("VHS Intensità",0.1,3.0,1.0,0.1,key=f"{key_prefix}_vi")
+            with c2: params["vhs_scanline_freq"]= st.slider("VHS Scanline", 0.1,3.0,1.0,0.1,key=f"{key_prefix}_vs")
+            with c3: params["vhs_color_shift"]  = st.slider("VHS Color",    0.1,3.0,1.0,0.1,key=f"{key_prefix}_vc")
+        if apply_dst:
+            c1,c2,c3 = st.columns(3)
+            with c1: params["dest_block_size"]  = st.slider("Dest Block",  0.1,3.0,1.0,0.1,key=f"{key_prefix}_db")
+            with c2: params["dest_num_blocks"]  = st.slider("Dest Num",    0.1,3.0,1.0,0.1,key=f"{key_prefix}_dn")
+            with c3: params["dest_displacement"]= st.slider("Dest Disp",   0.1,3.0,1.0,0.1,key=f"{key_prefix}_dd")
+        if apply_nse:
+            c1,c2,c3 = st.columns(3)
+            with c1: params["noise_intensity"]  = st.slider("Noise Int",  0.1,3.0,1.0,0.1,key=f"{key_prefix}_ni")
+            with c2: params["noise_coverage"]   = st.slider("Noise Cov",  0.1,3.0,1.0,0.1,key=f"{key_prefix}_nc")
+            with c3: params["noise_chaos"]      = st.slider("Noise Chaos",0.1,3.0,1.0,0.1,key=f"{key_prefix}_nh")
+        if apply_tv:
+            c1,c2,c3 = st.columns(3)
+            with c1: params["tv_shift_intensity"]= st.slider("TV Shift",  0.1,3.0,1.0,0.1,key=f"{key_prefix}_ts")
+            with c2: params["tv_line_height"]    = st.slider("TV Line",   0.1,3.0,1.0,0.1,key=f"{key_prefix}_tl")
+            with c3: params["tv_flicker_prob"]   = st.slider("TV Flicker",0.1,3.0,1.0,0.1,key=f"{key_prefix}_tf")
+
+    else:  # random
+        p1 = st.slider("Livello casualità", 0.1, 3.0, 1.0, 0.1, key=f"{key_prefix}_p1")
+        params = (p1,)
+
+    return effect, params
+
+
+def build_xfade_chain(clips, crossfades, transitions, audio_xfade):
+    """Costruisce ed esegue la catena ffmpeg xfade (video) + acrossfade (audio) tra N clip normalizzate."""
+    n = len(clips)
+    inputs = []
+    for c in clips:
+        inputs += ["-i", c["video"]]
+    if audio_xfade:
+        for c in clips:
+            inputs += ["-i", c["audio"]]
+
+    filter_parts = []
+    running = clips[0]["duration"]
+    last_v = "[0:v]"
+    for i in range(1, n):
+        off = max(0.0, running - crossfades[i - 1])
+        out_lbl = f"[v{i}]"
+        filter_parts.append(
+            f"{last_v}[{i}:v]xfade=transition={transitions[i-1]}:duration={crossfades[i-1]:.2f}:offset={off:.3f}{out_lbl}"
+        )
+        running = running + clips[i]["duration"] - crossfades[i - 1]
+        last_v = out_lbl
+
+    maps = ["-map", last_v]
+    if audio_xfade:
+        last_a = f"[{n}:a]"
+        for i in range(1, n):
+            out_lbl = f"[a{i}]"
+            filter_parts.append(f"{last_a}[{n+i}:a]acrossfade=d={crossfades[i-1]:.2f}{out_lbl}")
+            last_a = out_lbl
+        maps += ["-map", last_a]
+
+    filter_complex = ";".join(filter_parts)
+    fd, out_path = tempfile.mkstemp(suffix='_session.mp4')
+    os.close(fd)
+    cmd = ["ffmpeg"] + inputs + ["-filter_complex", filter_complex] + maps + [
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        out_path, "-y"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        st.error(f"❌ Errore FFmpeg xfade: {result.stderr[-800:]}")
+        return None
+    return out_path
+
+
+def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio, target_fps, audio_xfade):
+    """Applica l'effetto (globale o individuale) a ogni clip, normalizza fps/risoluzione, poi le monta con crossfade."""
+    if len(clips_cfg) < 2:
+        st.error("Servono almeno 2 clip per montare una sessione.")
+        return None
+
+    tmp_dir = tempfile.mkdtemp()
+    processed = []
+    prog = st.progress(0)
+    stat = st.empty()
+    tw, th = SESSION_TARGET_SIZES.get(aspect_ratio, (0, 0))
+
+    for i, entry in enumerate(clips_cfg):
+        stat.text(f"🎬 Clip {i+1}/{len(clips_cfg)}: {entry['name']} — applico effetto...")
+        in_path = os.path.join(tmp_dir, f"in_{i}.mp4")
+        with open(in_path, "wb") as f:
+            f.write(entry["file"].getbuffer())
+
+        eff = entry.get("effect_type", global_effect) if entry.get("mode") == "individuale" else global_effect
+        prm = entry.get("params", global_params) if entry.get("mode") == "individuale" else global_params
+
+        proc_path = process_video(in_path, eff, prm, max_frames=None,
+                                  audio_mode="0_originale", aspect_ratio=aspect_ratio)
+        if proc_path is None:
+            st.error(f"❌ Errore processando {entry['name']}")
+            return None
+
+        norm_path = os.path.join(tmp_dir, f"norm_{i}.mp4")
+        if tw and th:
+            vf = f"scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+        else:
+            vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
+        r = subprocess.run(["ffmpeg", "-i", proc_path, "-r", str(target_fps), "-vf", vf,
+                           "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+                           "-an", norm_path, "-y"], capture_output=True, text=True)
+        if r.returncode != 0:
+            st.error(f"❌ Errore normalizzazione {entry['name']}: {r.stderr[-400:]}")
+            return None
+
+        _, _, _, _, dur = get_video_info(norm_path)
+
+        aud_path = None
+        if audio_xfade:
+            aud_path = os.path.join(tmp_dir, f"aud_{i}.wav")
+            ar = subprocess.run(["ffmpeg", "-i", in_path, "-vn", "-acodec", "pcm_s16le",
+                               "-ar", "44100", "-ac", "2", aud_path, "-y"], capture_output=True, text=True)
+            if ar.returncode != 0 or not os.path.exists(aud_path) or get_file_size_mb(aud_path) == 0:
+                # nessuna traccia audio nella clip: genera silenzio della stessa durata
+                subprocess.run(["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                               "-t", str(dur), aud_path, "-y"], capture_output=True, text=True)
+
+        processed.append({"video": norm_path, "audio": aud_path, "duration": dur})
+        prog.progress((i + 1) / (len(clips_cfg) + 1))
+
+    stat.text("🔀 Applico crossfade tra le clip...")
+    crossfades  = [c.get("crossfade_dur", 1.0) for c in clips_cfg[:-1]]
+    transitions = [c.get("transition_type", "fade") for c in clips_cfg[:-1]]
+    for i in range(len(crossfades)):
+        max_allowed = min(processed[i]["duration"], processed[i + 1]["duration"]) - 0.2
+        crossfades[i] = max(0.1, min(crossfades[i], max_allowed if max_allowed > 0.1 else 0.1))
+
+    final_path = build_xfade_chain(processed, crossfades, transitions, audio_xfade)
+    prog.progress(1.0)
+    if final_path:
+        stat.text("✅ Sessione completata!")
+    return final_path
+
+
+def render_session_mode():
+    if "session_clip_settings" not in st.session_state:
+        st.session_state.session_clip_settings = []
+
+    uploaded_clips = st.file_uploader("Carica le clip, in ordine di caricamento", type=["mp4", "mov", "avi", "mkv"],
+                                      accept_multiple_files=True, key="session_uploader")
+
+    if uploaded_clips:
+        existing = {c["key"]: c for c in st.session_state.session_clip_settings}
+        new_list = []
+        for f in uploaded_clips:
+            k = f"{f.name}_{f.size}"
+            entry = existing.get(k, {"key": k, "name": f.name, "mode": "globale"})
+            entry["file"] = f
+            new_list.append(entry)
+        st.session_state.session_clip_settings = new_list
+
+    clips_cfg = st.session_state.session_clip_settings
+
+    if not clips_cfg:
+        st.info("Carica almeno 2 video per iniziare a montare la sessione.")
+        return
+
+    st.markdown(f"**{len(clips_cfg)} clip in coda**")
+    for i, entry in enumerate(clips_cfg):
+        with st.container(border=True):
+            top = st.columns([6, 1, 1])
+            top[0].markdown(f"**{i+1}. {entry['name']}**")
+            if top[1].button("⬆️", key=f"up_{entry['key']}", disabled=(i == 0)):
+                clips_cfg[i-1], clips_cfg[i] = clips_cfg[i], clips_cfg[i-1]
+                st.rerun()
+            if top[2].button("⬇️", key=f"down_{entry['key']}", disabled=(i == len(clips_cfg)-1)):
+                clips_cfg[i+1], clips_cfg[i] = clips_cfg[i], clips_cfg[i+1]
+                st.rerun()
+
+            mode_choice = st.radio("Effetto per questa clip", ["🌐 Globale", "🎛️ Individuale"],
+                                   index=0 if entry.get("mode", "globale") == "globale" else 1,
+                                   horizontal=True, key=f"mode_{entry['key']}")
+            entry["mode"] = "globale" if mode_choice == "🌐 Globale" else "individuale"
+            if entry["mode"] == "individuale":
+                eff, prm = render_mini_effect_picker(f"ind_{entry['key']}")
+                entry["effect_type"], entry["params"] = eff, prm
+
+            if i < len(clips_cfg) - 1:
+                cx1, cx2 = st.columns(2)
+                with cx1:
+                    entry["crossfade_dur"] = st.slider(f"↔️ Crossfade verso clip {i+2} (sec)", 0.2, 3.0,
+                                                       entry.get("crossfade_dur", 1.0), 0.1,
+                                                       key=f"xf_{entry['key']}")
+                with cx2:
+                    entry["transition_type"] = st.selectbox("Tipo transizione", SESSION_TRANSITIONS,
+                                                            key=f"tt_{entry['key']}")
+
+    st.markdown("#### 🌐 Effetto globale (per le clip in modalità Globale)")
+    global_effect, global_params = render_mini_effect_picker("session_global")
+
+    st.markdown("#### ⚙️ Impostazioni sessione")
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        session_aspect = st.selectbox("Formato output", ["16:9", "9:16", "1:1", "Originale"], key="session_aspect")
+    with sc2:
+        session_fps = st.selectbox("FPS sessione", [24, 25, 30], key="session_fps")
+    with sc3:
+        session_audio_xfade = st.checkbox("🔊 Crossfade audio", value=True, key="session_audio_xfade")
+
+    if len(clips_cfg) < 2:
+        st.warning("⚠️ Carica almeno 2 clip per poter montare una sessione con crossfade.")
+        return
+
+    if st.button("🎬 Genera Sessione", type="primary", key="session_generate"):
+        if not check_ffmpeg():
+            st.error("❌ FFmpeg non disponibile: impossibile montare la sessione.")
+            return
+        final_path = run_multiclip_session(clips_cfg, global_effect, global_params,
+                                           session_aspect, session_fps, session_audio_xfade)
+        if final_path:
+            st.video(final_path)
+            with open(final_path, "rb") as f:
+                st.download_button("⬇️ Scarica sessione montata", f, file_name="videodistruktor_session.mp4",
+                                  mime="video/mp4", key="session_download")
+
+
 # Interfaccia Streamlit principale
 if 'report_data' not in st.session_state: st.session_state.report_data = ""
 if 'video_ready' not in st.session_state: st.session_state.video_ready = False
@@ -1678,6 +1968,12 @@ if 'use_audio_reactive' not in st.session_state: st.session_state.use_audio_reac
 if 'glitched_audio_path' not in st.session_state: st.session_state.glitched_audio_path = ""
 if 'glitched_audio_name' not in st.session_state: st.session_state.glitched_audio_name = ""
 
+with st.expander("🎞️ Sessione Multi-Clip — carica più video, montali con crossfade (Beta)", expanded=False):
+    st.caption("Carica più clip, ordinale con ⬆️⬇️, scegli l'effetto (globale o per singola clip) "
+              "e la durata/tipo di crossfade tra ogni coppia di clip.")
+    render_session_mode()
+
+st.divider()
 
 if uploaded_file is not None:
     ffmpeg_available = check_ffmpeg()
