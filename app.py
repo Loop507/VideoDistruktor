@@ -1226,7 +1226,9 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                   mask_type="nessuna", mask_x=0.5, mask_y=0.5, mask_w=1.0, mask_h=0.3,
                   mask_feather=0, mask_reverse=False,
                   beat_sync=False, beat_decay=6, beat_intensity=2.0,
-                  masks_list=None):
+                  masks_list=None,
+                  temporal_crossfade=False, tc_source="rms",
+                  tc_alpha_min=0.0, tc_alpha_max=1.0, tc_smooth=0.7):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         st.error("❌ Impossibile aprire il video.")
@@ -1262,6 +1264,10 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
         SLIT_BUF_LEN = 30
         progress_bar = st.progress(0)
         status_text  = st.empty()
+
+        # Crossfade audio-reattivo: stato smoothing (attack/release) tra frame
+        _tc_active = temporal_crossfade and audio_env is not None and tc_source in audio_env
+        _tc_smoothed = 0.5
 
         # Determina se usare il sistema multi-maschera (con eventuale animazione)
         _use_multi_mask = masks_list is not None and len(masks_list) > 0
@@ -1384,6 +1390,14 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
             else:
                 orig_cropped = frame if frame.shape[:2] == (out_h, out_w) else cv2.resize(frame, (out_w, out_h))
 
+            # Crossfade audio-reattivo: dissolvenza morbida originale <-> effetto
+            if _tc_active:
+                _env = audio_env[tc_source]
+                _raw = float(_env[frame_count]) if frame_count < len(_env) else float(_env[-1])
+                _tc_smoothed = _tc_smoothed * tc_smooth + _raw * (1.0 - tc_smooth)
+                _alpha = tc_alpha_min + (tc_alpha_max - tc_alpha_min) * float(np.clip(_tc_smoothed, 0.0, 1.0))
+                processed = cv2.addWeighted(orig_cropped, 1.0 - _alpha, processed, _alpha, 0)
+
             # Applica maschera (nessuna = passa tutto, altrimenti blend)
             if _use_mask:
                 if _has_animated_mask:
@@ -1418,35 +1432,36 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 return final_output_path
             return temp_video_path
 
-        elif audio_mode in ("2_distruggi", "3_solo_effetto", "1_carica") and check_ffmpeg():
-            status_text.text("🎵 Glitch audio in corso...")
-            # Sorgente audio
-            if audio_mode == "1_carica" and audio_source_path:
+        elif audio_mode in ("2_distruggi", "1_carica", "1_carica_distruggi") and check_ffmpeg():
+            # Sorgente audio: file esterno caricato se presente, altrimenti quello del video
+            if audio_mode in ("1_carica", "1_carica_distruggi") and audio_source_path:
                 raw_audio = convert_audio_to_wav(audio_source_path)
             else:
                 raw_audio = extract_audio(video_path)
 
             if raw_audio:
-                # effetti video-only usano 'noise' per l'audio (nessun corrispondente audio nativo)
-                VIDEO_ONLY_FX = {'pixel_sort','channel_shift','datamosh','byte_corrupt',
-                                 'slice_shift','echo_smear','rgb_wave','mirror_blocks',
-                                 'color_quantize','moire','feedback_loop','pixel_drift',
-                                 'slit_scan','thermal','ascii_glitch','halftone',
-                                 'chroma_pulse'}
-                a_eff = 'noise' if effect_type in VIDEO_ONLY_FX else effect_type
-                a_params = audio_params_override if audio_params_override is not None else (1.0, 1.0, 1.0)
-                glitched_audio = process_audio_glitch(raw_audio, a_eff, a_params)
-                audio_to_use = glitched_audio if glitched_audio else raw_audio
-
-                if audio_mode == "3_solo_effetto":
-                    # usa solo l'audio glitchato, nessun originale dal video
-                    cmd = ['ffmpeg', '-i', temp_video_path, '-i', audio_to_use,
-                           '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
-                           '-shortest', final_output_path, '-y']
+                if audio_mode == "1_carica":
+                    # Audio esterno usato COSÌ COM'È, nessun glitch applicato
+                    status_text.text("🎵 Uso audio caricato (non modificato)...")
+                    glitched_audio = None
+                    audio_to_use = raw_audio
                 else:
-                    cmd = ['ffmpeg', '-i', temp_video_path, '-i', audio_to_use,
-                           '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
-                           '-shortest', final_output_path, '-y']
+                    # "2_distruggi" (audio del video) o "1_carica_distruggi" (audio esterno): applica il glitch
+                    status_text.text("🎵 Glitch audio in corso...")
+                    # effetti video-only usano 'noise' per l'audio (nessun corrispondente audio nativo)
+                    VIDEO_ONLY_FX = {'pixel_sort','channel_shift','datamosh','byte_corrupt',
+                                     'slice_shift','echo_smear','rgb_wave','mirror_blocks',
+                                     'color_quantize','moire','feedback_loop','pixel_drift',
+                                     'slit_scan','thermal','ascii_glitch','halftone',
+                                     'chroma_pulse'}
+                    a_eff = 'noise' if effect_type in VIDEO_ONLY_FX else effect_type
+                    a_params = audio_params_override if audio_params_override is not None else (1.0, 1.0, 1.0)
+                    glitched_audio = process_audio_glitch(raw_audio, a_eff, a_params)
+                    audio_to_use = glitched_audio if glitched_audio else raw_audio
+
+                cmd = ['ffmpeg', '-i', temp_video_path, '-i', audio_to_use,
+                       '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
+                       '-shortest', final_output_path, '-y']
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode != 0:
                     st.error(f"FFmpeg audio merge error: {result.stderr[-500:]}")
@@ -1545,14 +1560,23 @@ def get_video_info(path):
 
 def build_report(original_name, original_size_mb, output_size_mb,
                  fps, width, height, total_frames, duration,
-                 effect_type, params, include_audio, kf_df=None):
-    """Genera il report testuale."""
+                 effect_type, params, include_audio, kf_df=None,
+                 tc_info=None):
+    """Genera il report testuale bilingue IT/EN."""
 
-    effect_names = {
+    effect_names_it = {
         'vhs':        'VHS Glitch',
         'distruttivo':'Distruttivo',
         'noise':      'Noise',
         'combined':   'Combinato',
+        'broken_tv':  'Broken TV',
+        'random':     'Random'
+    }
+    effect_names_en = {
+        'vhs':        'VHS Glitch',
+        'distruttivo':'Destructive',
+        'noise':      'Noise',
+        'combined':   'Combined',
         'broken_tv':  'Broken TV',
         'random':     'Random'
     }
@@ -1566,43 +1590,75 @@ def build_report(original_name, original_size_mb, output_size_mb,
         'random':     '#randomglitch #chaosfx #unknownsignal'
     }
 
-    # Parametri leggibili
+    # Parametri leggibili (IT / EN)
     if effect_type == 'vhs' and isinstance(params, tuple):
-        param_str = f"Intensita' {params[0]} | Scanline {params[1]} | Color Shift {params[2]}"
+        param_str_it = f"Intensita' {params[0]} | Scanline {params[1]} | Color Shift {params[2]}"
+        param_str_en = f"Intensity {params[0]} | Scanline {params[1]} | Color Shift {params[2]}"
     elif effect_type == 'distruttivo' and isinstance(params, tuple):
-        param_str = f"Block Size {params[0]} | Num Blocks {params[1]} | Displacement {params[2]}"
+        param_str_it = f"Block Size {params[0]} | Num Blocks {params[1]} | Displacement {params[2]}"
+        param_str_en = f"Block Size {params[0]} | Block Count {params[1]} | Displacement {params[2]}"
     elif effect_type == 'noise' and isinstance(params, tuple):
-        param_str = f"Intensita' {params[0]} | Coverage {params[1]} | Chaos {params[2]}"
+        param_str_it = f"Intensita' {params[0]} | Coverage {params[1]} | Chaos {params[2]}"
+        param_str_en = f"Intensity {params[0]} | Coverage {params[1]} | Chaos {params[2]}"
     elif effect_type == 'broken_tv' and isinstance(params, tuple):
-        param_str = f"Shift {params[0]} | Line Height {params[1]} | Flicker {params[2]}"
+        param_str_it = f"Shift {params[0]} | Line Height {params[1]} | Flicker {params[2]}"
+        param_str_en = f"Shift {params[0]} | Line Height {params[1]} | Flicker {params[2]}"
     elif effect_type == 'combined' and isinstance(params, dict):
         active = [k.replace('apply_','').upper() for k,v in params.items() if k.startswith('apply_') and v]
-        param_str = "Effetti attivi: " + ", ".join(active)
+        param_str_it = "Effetti attivi: " + ", ".join(active)
+        param_str_en = "Active effects: " + ", ".join(active)
     elif effect_type == 'random' and isinstance(params, tuple):
-        param_str = f"Livello casualita' {params[0]}"
+        param_str_it = f"Livello casualita' {params[0]}"
+        param_str_en = f"Randomness level {params[0]}"
     else:
-        param_str = "—"
+        param_str_it = "—"
+        param_str_en = "—"
 
     effect_hashtags = hashtag_map.get(effect_type, '')
 
+    kf_block_it = ('* Keyframe Intensita\':' + chr(10) +
+                   chr(10).join([f'  {row["Secondo"]}s -> {row["Intensita\'"]}' for _, row in kf_df.iterrows()])
+                   ) if kf_df is not None and len(kf_df) >= 2 else ''
+    kf_block_en = ('* Intensity Keyframes:' + chr(10) +
+                   chr(10).join([f'  {row["Secondo"]}s -> {row["Intensita\'"]}' for _, row in kf_df.iterrows()])
+                   ) if kf_df is not None and len(kf_df) >= 2 else ''
+
+    tc_block_it = f'* Crossfade Audio-Reattivo: {tc_info}' if tc_info else ''
+    tc_block_en = f'* Audio-Reactive Crossfade: {tc_info}' if tc_info else ''
+
     report = f"""[STUDIO_GLITCH_VIDEO] // VOL_01 // H.264 // DATA_CORRUPTION
-:: MOTORE: videodistruktor [v1.1]
-:: EFFETTO: {effect_names.get(effect_type, effect_type)}
-:: PROCESSO: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
+:: MOTORE / ENGINE: videodistruktor [v1.1]
+:: EFFETTO / EFFECT: {effect_names_it.get(effect_type, effect_type)} / {effect_names_en.get(effect_type, effect_type)}
+:: PROCESSO / PROCESS: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
 
 "Il glitch non e' accaduto. E' stato scelto."
+"The glitch didn't happen. It was chosen."
 
-> TECHNICAL LOG SHEET:
+──────────────────────────────────
+:: IT — SCHEDA TECNICA
+──────────────────────────────────
 * File: {original_name}
 * Durata: {duration} sec | Frame: {total_frames} @ {fps}fps
 * Risoluzione: {width}x{height}
 * Originale: {original_size_mb} MB → Output: {output_size_mb} MB
 * Effetto Audio: {'ON' if include_audio else 'OFF'}
-* Parametri: {param_str}
+* Parametri: {param_str_it}
+{kf_block_it}
+{tc_block_it}
 
-{'* Keyframe Intensita\':' + chr(10) + chr(10).join([f'  {row["Secondo"]}s -> {row["Intensita\'"]}'  for _, row in kf_df.iterrows()]) if kf_df is not None and len(kf_df) >= 2 else ''}
+──────────────────────────────────
+:: EN — TECHNICAL LOG SHEET
+──────────────────────────────────
+* File: {original_name}
+* Duration: {duration} sec | Frames: {total_frames} @ {fps}fps
+* Resolution: {width}x{height}
+* Original: {original_size_mb} MB → Output: {output_size_mb} MB
+* Audio Effect: {'ON' if include_audio else 'OFF'}
+* Parameters: {param_str_en}
+{kf_block_en}
+{tc_block_en}
 
-> Regia e Algoritmo: Loop507
+> Regia e Algoritmo / Direction & Algorithm: Loop507
 
 #loop507 #glitchart #videodistruktor #datacorruption #experimentalvideo
 {effect_hashtags} #brutalistart #framecorruption #signalcorruption"""
@@ -1922,6 +1978,30 @@ if uploaded_file is not None:
                 beat_decay = st.slider("Decay (frame)", 1, 30, 6, 1, key="bs_decay",
                     help="Frame per tornare al 37% del picco. 6@24fps = ~250ms")
 
+        # ── CROSSFADE AUDIO-REATTIVO (originale <-> effetto) ─────
+        use_temporal_crossfade = st.toggle("🌊 Crossfade Audio-Reattivo",
+            help="Dissolvenza morbida tra frame originale ed effetto, invece del taglio secco. "
+                 "L'intensità della dissolvenza segue l'audio (RMS/beat/frequenze).")
+        tc_source     = "rms"
+        tc_alpha_min  = 0.0
+        tc_alpha_max  = 1.0
+        tc_smooth     = 0.7
+        if use_temporal_crossfade:
+            tc1, tc2 = st.columns(2)
+            with tc1:
+                tc_source = st.selectbox("Sorgente audio", ["rms", "beats", "low_freq", "high_freq", "spectral"],
+                    format_func=lambda x: {"rms":"🔊 RMS (energia)", "beats":"🥁 Beat",
+                                            "low_freq":"🔈 Bassi", "high_freq":"🔉 Alti",
+                                            "spectral":"📊 Centroide spettrale"}[x],
+                    key="tc_source")
+                tc_smooth = st.slider("Morbidezza dissolvenza", 0.0, 0.95, 0.7, 0.05, key="tc_smooth",
+                    help="Più alto = transizioni più lente e fluide, meno alto = più reattivo/scattante.")
+            with tc2:
+                tc_alpha_min = st.slider("Effetto visibile (minimo)", 0.0, 1.0, 0.0, 0.05, key="tc_alpha_min",
+                    help="Quanto effetto resta visibile nei momenti 'silenziosi'.")
+                tc_alpha_max = st.slider("Effetto visibile (massimo)", 0.0, 1.0, 1.0, 0.05, key="tc_alpha_max",
+                    help="Quanto effetto è visibile nei picchi audio.")
+
         # ── KEYFRAME ─────────────────────────────────────────────
         kf_df = None
         use_keyframes = False
@@ -2221,7 +2301,7 @@ if uploaded_file is not None:
 
             # Analisi audio (serve sia per audio_reactive che per beat_sync)
             audio_env = None
-            if use_audio_reactive or beat_sync:
+            if use_audio_reactive or beat_sync or use_temporal_crossfade:
                 with st.spinner("🎵 Analisi audio..."):
                     _tmp_wav = extract_audio(video_path, silent=True)
                     if _tmp_wav:
@@ -2233,7 +2313,7 @@ if uploaded_file is not None:
                         try: os.unlink(_tmp_wav)
                         except: pass
                     else:
-                        st.warning("⚠️ Nessuna traccia audio trovata nel video — Beat Sync disabilitato.")
+                        st.warning("⚠️ Nessuna traccia audio trovata nel video — Audio Reactive/Beat Sync/Crossfade disabilitati.")
 
             # Gestione sorgente audio esterna
             audio_source_path = None
@@ -2249,8 +2329,8 @@ if uploaded_file is not None:
                 "0_originale":        "0_originale",
                 "2_distruggi":        "2_distruggi",
                 "1_mix":              "2_distruggi",   # mix: distruggi poi mixiamo sotto
-                "3_esterno":          "1_carica",
-                "4_esterno_distruggi":"1_carica",
+                "3_esterno":          "1_carica",            # audio esterno pulito, NON glitchato
+                "4_esterno_distruggi":"1_carica_distruggi",  # audio esterno + glitch
             }
             _process_audio_mode = _mode_map.get(audio_mode, "0_originale")
 
@@ -2261,7 +2341,9 @@ if uploaded_file is not None:
                                         mask_type, mask_x, mask_y, mask_w, mask_h,
                                         mask_feather, mask_reverse,
                                         beat_sync, beat_decay, beat_intensity,
-                                        masks_list=masks_list)
+                                        masks_list=masks_list,
+                                        temporal_crossfade=use_temporal_crossfade, tc_source=tc_source,
+                                        tc_alpha_min=tc_alpha_min, tc_alpha_max=tc_alpha_max, tc_smooth=tc_smooth)
 
             if result_path:
                 st.success("✅ Video processato!")
@@ -2308,10 +2390,16 @@ if uploaded_file is not None:
                 output_video_name = f"{video_stem}_{effect_label}.mp4"
                 report_name       = f"{video_stem}_{effect_label}.txt"
 
+                _tc_info = None
+                if use_temporal_crossfade:
+                    _tc_info = (f"{tc_source} | range {tc_alpha_min}-{tc_alpha_max} | "
+                                f"smooth {tc_smooth}")
+
                 st.session_state.report_data = build_report(
                     uploaded_file.name, orig_size, out_size,
                     fps_v, w_v, h_v, frames_v, dur_v,
-                    effect_type, params, audio_mode != "0_originale", kf_df
+                    effect_type, params, audio_mode != "0_originale", kf_df,
+                    tc_info=_tc_info
                 )
                 st.session_state.h264_path         = h264_path
                 st.session_state.output_video_name = output_video_name
