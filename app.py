@@ -1558,28 +1558,63 @@ def get_video_info(path):
     except:
         return 0, 0, 0, 0, 0
 
+EFFECT_LABELS_IT = {
+    'pixel_sort':"Pixel Sort", 'channel_shift':"Channel Shift", 'datamosh':"Datamosh",
+    'byte_corrupt':"Byte Corrupt", 'slice_shift':"Slice Shift", 'echo_smear':"Echo Smear",
+    'rgb_wave':"RGB Wave", 'mirror_blocks':"Mirror Blocks", 'color_quantize':"Color Quantize",
+    'moire':"Moiré Pattern", 'feedback_loop':"Feedback Loop", 'pixel_drift':"Pixel Drift",
+    'slit_scan':"Slit Scan", 'thermal':"Thermal Vision", 'ascii_glitch':"ASCII Glitch",
+    'halftone':"Halftone Destroy", 'chroma_pulse':"Chroma Pulse",
+    'vhs':"VHS Glitch", 'distruttivo':"Distruttivo", 'noise':"Noise",
+    'broken_tv':"Broken TV", 'combined':"Combinato", 'random':"Random"
+}
+EFFECT_LABELS_EN = {**EFFECT_LABELS_IT, 'distruttivo': "Destructive", 'combined': "Combined"}
+
+PARAM_LABELS = {
+    'pixel_sort':    [("Intensita'","Intensity"), ("Soglia luma","Luma threshold"), ("Direzione","Direction")],
+    'channel_shift': [("Intensita'","Intensity"), ("Spread","Spread"), ("Verticale","Vertical")],
+    'datamosh':      [("Intensita'","Intensity"), ("Block size","Block size"), ("Chaos","Chaos")],
+    'byte_corrupt':  [("Intensita'","Intensity"), ("Chunk size","Chunk size"), ("Random","Random")],
+    'slice_shift':   [("Intensita'","Intensity"), ("Num slices","Slice count"), ("Drift","Drift")],
+    'echo_smear':    [("Intensita'","Intensity"), ("Decay","Decay"), ("Smear","Smear")],
+    'rgb_wave':      [("Intensita'","Intensity"), ("Frequenza","Frequency"), ("Phase chaos","Phase chaos")],
+    'mirror_blocks': [("Intensita'","Intensity"), ("Block size","Block size"), ("Flip prob","Flip prob")],
+    'color_quantize':[("Intensita'","Intensity"), ("Livelli","Levels"), ("Dither","Dither")],
+    'moire':         [("Intensita'","Intensity"), ("Frequenza","Frequency"), ("Angolo","Angle")],
+    'feedback_loop': [("Intensita'","Intensity"), ("Zoom","Zoom"), ("Rotazione","Rotation")],
+    'pixel_drift':   [("Intensita'","Intensity"), ("Drift speed","Drift speed"), ("Turbolenza","Turbulence")],
+    'slit_scan':     [("Intensita'","Intensity"), ("Speed","Speed"), ("Tilt","Tilt")],
+    'thermal':       [("Intensita'","Intensity"), ("Noise sensore","Sensor noise"), ("Aberrazione","Aberration")],
+    'ascii_glitch':  [("Intensita'","Intensity"), ("Block size","Block size"), ("Chaos","Chaos")],
+    'halftone':      [("Intensita'","Intensity"), ("Dot size","Dot size"), ("Angolo","Angle")],
+    'chroma_pulse':  [("Intensita'","Intensity"), ("Radiale","Radial"), ("Pulse speed","Pulse speed")],
+    'vhs':           [("Intensita'","Intensity"), ("Scanline","Scanline"), ("Color shift","Color shift")],
+    'distruttivo':   [("Block size","Block size"), ("Num blocks","Block count"), ("Displacement","Displacement")],
+    'noise':         [("Intensita'","Intensity"), ("Coverage","Coverage"), ("Chaos","Chaos")],
+    'broken_tv':     [("Shift","Shift"), ("Line height","Line height"), ("Flicker","Flicker")],
+}
+
+def format_effect_params(effect_type, params, lang='it'):
+    """Formatta i parametri di un effetto in IT o EN. Copre tutti i 23 effetti + combined + random."""
+    idx = 0 if lang == 'it' else 1
+    if effect_type in PARAM_LABELS and isinstance(params, tuple):
+        spec = PARAM_LABELS[effect_type]
+        return " | ".join(f"{spec[i][idx]} {params[i]}" for i in range(min(len(spec), len(params))))
+    if effect_type == 'combined' and isinstance(params, dict):
+        active = [k.replace('apply_', '').upper() for k, v in params.items() if k.startswith('apply_') and v]
+        label = "Effetti attivi" if lang == 'it' else "Active effects"
+        return f"{label}: " + ", ".join(active)
+    if effect_type == 'random' and isinstance(params, tuple):
+        label = "Livello casualita'" if lang == 'it' else "Randomness level"
+        return f"{label} {params[0]}"
+    return "—"
+
+
 def build_report(original_name, original_size_mb, output_size_mb,
                  fps, width, height, total_frames, duration,
                  effect_type, params, include_audio, kf_df=None,
                  tc_info=None):
     """Genera il report testuale bilingue IT/EN."""
-
-    effect_names_it = {
-        'vhs':        'VHS Glitch',
-        'distruttivo':'Distruttivo',
-        'noise':      'Noise',
-        'combined':   'Combinato',
-        'broken_tv':  'Broken TV',
-        'random':     'Random'
-    }
-    effect_names_en = {
-        'vhs':        'VHS Glitch',
-        'distruttivo':'Destructive',
-        'noise':      'Noise',
-        'combined':   'Combined',
-        'broken_tv':  'Broken TV',
-        'random':     'Random'
-    }
 
     hashtag_map = {
         'vhs':        '#vhsglitch #tapeglitch #analogcorruption',
@@ -1590,31 +1625,9 @@ def build_report(original_name, original_size_mb, output_size_mb,
         'random':     '#randomglitch #chaosfx #unknownsignal'
     }
 
-    # Parametri leggibili (IT / EN)
-    if effect_type == 'vhs' and isinstance(params, tuple):
-        param_str_it = f"Intensita' {params[0]} | Scanline {params[1]} | Color Shift {params[2]}"
-        param_str_en = f"Intensity {params[0]} | Scanline {params[1]} | Color Shift {params[2]}"
-    elif effect_type == 'distruttivo' and isinstance(params, tuple):
-        param_str_it = f"Block Size {params[0]} | Num Blocks {params[1]} | Displacement {params[2]}"
-        param_str_en = f"Block Size {params[0]} | Block Count {params[1]} | Displacement {params[2]}"
-    elif effect_type == 'noise' and isinstance(params, tuple):
-        param_str_it = f"Intensita' {params[0]} | Coverage {params[1]} | Chaos {params[2]}"
-        param_str_en = f"Intensity {params[0]} | Coverage {params[1]} | Chaos {params[2]}"
-    elif effect_type == 'broken_tv' and isinstance(params, tuple):
-        param_str_it = f"Shift {params[0]} | Line Height {params[1]} | Flicker {params[2]}"
-        param_str_en = f"Shift {params[0]} | Line Height {params[1]} | Flicker {params[2]}"
-    elif effect_type == 'combined' and isinstance(params, dict):
-        active = [k.replace('apply_','').upper() for k,v in params.items() if k.startswith('apply_') and v]
-        param_str_it = "Effetti attivi: " + ", ".join(active)
-        param_str_en = "Active effects: " + ", ".join(active)
-    elif effect_type == 'random' and isinstance(params, tuple):
-        param_str_it = f"Livello casualita' {params[0]}"
-        param_str_en = f"Randomness level {params[0]}"
-    else:
-        param_str_it = "—"
-        param_str_en = "—"
-
-    effect_hashtags = hashtag_map.get(effect_type, '')
+    param_str_it = format_effect_params(effect_type, params, 'it')
+    param_str_en = format_effect_params(effect_type, params, 'en')
+    effect_hashtags = hashtag_map.get(effect_type, '#glitchfx #videoart #signalprocessing')
 
     kf_block_it = ('* Keyframe Intensita\':' + chr(10) +
                    chr(10).join([f'  {row["Secondo"]}s -> {row["Intensita\'"]}' for _, row in kf_df.iterrows()])
@@ -1626,13 +1639,11 @@ def build_report(original_name, original_size_mb, output_size_mb,
     tc_block_it = f'* Crossfade Audio-Reattivo: {tc_info}' if tc_info else ''
     tc_block_en = f'* Audio-Reactive Crossfade: {tc_info}' if tc_info else ''
 
-    report = f"""[STUDIO_GLITCH_VIDEO] // VOL_01 // H.264 // DATA_CORRUPTION
+    DIVIDER = "_" * 69
 
-══════════════════════════════════
-:: IT — ITALIANO
-══════════════════════════════════
+    report = f"""[STUDIO_GLITCH_VIDEO] // VOL_01 // H.264 // DATA_CORRUPTION
 :: MOTORE: videodistruktor [v1.1]
-:: EFFETTO: {effect_names_it.get(effect_type, effect_type)}
+:: EFFETTO: {EFFECT_LABELS_IT.get(effect_type, effect_type)}
 :: PROCESSO: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
 
 "Il glitch non e' accaduto. E' stato scelto."
@@ -1647,11 +1658,11 @@ def build_report(original_name, original_size_mb, output_size_mb,
 {kf_block_it}
 {tc_block_it}
 
-══════════════════════════════════
-:: EN — ENGLISH
-══════════════════════════════════
+{DIVIDER}
+
+[STUDIO_GLITCH_VIDEO] // VOL_01 // H.264 // DATA_CORRUPTION
 :: ENGINE: videodistruktor [v1.1]
-:: EFFECT: {effect_names_en.get(effect_type, effect_type)}
+:: EFFECT: {EFFECT_LABELS_EN.get(effect_type, effect_type)}
 :: PROCESS: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
 
 "The glitch didn't happen. It was chosen."
@@ -1967,8 +1978,11 @@ def build_session_report(clips_cfg, global_effect, global_params, session_aspect
             eff = global_effect
             tag_it, tag_en = "globale", "global"
         eff_label = SESSION_EFFECT_LABELS.get(eff, eff)
-        lines_it.append(f"  {i+1}. {c['name']} — effetto {tag_it}: {eff_label}")
-        lines_en.append(f"  {i+1}. {c['name']} — {tag_en} effect: {eff_label}")
+        prm = c.get("params", global_params) if c.get("mode") == "individuale" else global_params
+        prm_it = format_effect_params(eff, prm, 'it')
+        prm_en = format_effect_params(eff, prm, 'en')
+        lines_it.append(f"  {i+1}. {c['name']} — effetto {tag_it}: {eff_label} ({prm_it})")
+        lines_en.append(f"  {i+1}. {c['name']} — {tag_en} effect: {eff_label} ({prm_en})")
         if i < len(clips_cfg) - 1:
             tt = c.get("transition_type", "fade")
             tt_label = SESSION_TRANSITION_LABELS.get(tt, tt)
@@ -1976,11 +1990,9 @@ def build_session_report(clips_cfg, global_effect, global_params, session_aspect
             lines_it.append(f"     ↔ crossfade {dur}s [{tt_label}] → clip {i+2}")
             lines_en.append(f"     ↔ crossfade {dur}s [{tt_label}] → clip {i+2}")
 
-    report = f"""[STUDIO_GLITCH_VIDEO] // SESSION_MODE // H.264 // MULTI_CLIP_MONTAGE
+    DIVIDER = "_" * 69
 
-══════════════════════════════════
-:: IT — ITALIANO
-══════════════════════════════════
+    report = f"""[STUDIO_GLITCH_VIDEO] // SESSION_MODE // H.264 // MULTI_CLIP_MONTAGE
 :: MOTORE: videodistruktor session [v1.1]
 :: PROCESSO: Multi-Clip Crossfade Montage
 
@@ -1994,9 +2006,9 @@ def build_session_report(clips_cfg, global_effect, global_params, session_aspect
 * Sequenza:
 {chr(10).join(lines_it)}
 
-══════════════════════════════════
-:: EN — ENGLISH
-══════════════════════════════════
+{DIVIDER}
+
+[STUDIO_GLITCH_VIDEO] // SESSION_MODE // H.264 // MULTI_CLIP_MONTAGE
 :: ENGINE: videodistruktor session [v1.1]
 :: PROCESS: Multi-Clip Crossfade Montage
 
