@@ -1627,16 +1627,17 @@ def build_report(original_name, original_size_mb, output_size_mb,
     tc_block_en = f'* Audio-Reactive Crossfade: {tc_info}' if tc_info else ''
 
     report = f"""[STUDIO_GLITCH_VIDEO] // VOL_01 // H.264 // DATA_CORRUPTION
-:: MOTORE / ENGINE: videodistruktor [v1.1]
-:: EFFETTO / EFFECT: {effect_names_it.get(effect_type, effect_type)} / {effect_names_en.get(effect_type, effect_type)}
-:: PROCESSO / PROCESS: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
+
+══════════════════════════════════
+:: IT — ITALIANO
+══════════════════════════════════
+:: MOTORE: videodistruktor [v1.1]
+:: EFFETTO: {effect_names_it.get(effect_type, effect_type)}
+:: PROCESSO: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
 
 "Il glitch non e' accaduto. E' stato scelto."
-"The glitch didn't happen. It was chosen."
 
-──────────────────────────────────
-:: IT — SCHEDA TECNICA
-──────────────────────────────────
+:: SCHEDA TECNICA
 * File: {original_name}
 * Durata: {duration} sec | Frame: {total_frames} @ {fps}fps
 * Risoluzione: {width}x{height}
@@ -1646,9 +1647,16 @@ def build_report(original_name, original_size_mb, output_size_mb,
 {kf_block_it}
 {tc_block_it}
 
-──────────────────────────────────
-:: EN — TECHNICAL LOG SHEET
-──────────────────────────────────
+══════════════════════════════════
+:: EN — ENGLISH
+══════════════════════════════════
+:: ENGINE: videodistruktor [v1.1]
+:: EFFECT: {effect_names_en.get(effect_type, effect_type)}
+:: PROCESS: Frame Destruction / {'Audio Corruption' if include_audio else 'Video Only'}
+
+"The glitch didn't happen. It was chosen."
+
+:: TECHNICAL LOG SHEET
 * File: {original_name}
 * Duration: {duration} sec | Frames: {total_frames} @ {fps}fps
 * Resolution: {width}x{height}
@@ -1658,7 +1666,7 @@ def build_report(original_name, original_size_mb, output_size_mb,
 {kf_block_en}
 {tc_block_en}
 
-> Regia e Algoritmo / Direction & Algorithm: Loop507
+> Direction & Algorithm: Loop507
 
 #loop507 #glitchart #videodistruktor #datacorruption #experimentalvideo
 {effect_hashtags} #brutalistart #framecorruption #signalcorruption"""
@@ -1704,7 +1712,13 @@ SESSION_EFFECT_LABELS = {
     "broken_tv":"📻 Broken TV", "noise":"📺 Noise", "distruttivo":"💥 Distruttivo",
     "combined":"🌟 Combinato", "random":"🎲 Random"
 }
-SESSION_TRANSITIONS = ["fade", "fadeblack", "wipeleft", "wiperight", "circleopen", "pixelize"]
+SESSION_TRANSITIONS = ["fade", "fadeblack", "wipeleft", "wiperight", "circleopen", "pixelize", "stile_video"]
+SESSION_TRANSITION_LABELS = {
+    "fade": "Fade (dissolvenza classica)", "fadeblack": "Fade to black",
+    "wipeleft": "Wipe ←", "wiperight": "Wipe →", "circleopen": "Circle open",
+    "pixelize": "Pixelize", "stile_video": "🎬 Stesso stile del video (glitch random)"
+}
+GLITCH_TRANSITIONS = ["pixelize", "hlslice", "vuslice", "squeezeh", "squeezev", "distance"]
 SESSION_TARGET_SIZES = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
 
 
@@ -1795,7 +1809,7 @@ def build_xfade_chain(clips, crossfades, transitions, audio_xfade):
     fd, out_path = tempfile.mkstemp(suffix='_session.mp4')
     os.close(fd)
     cmd = ["ffmpeg"] + inputs + ["-filter_complex", filter_complex] + maps + [
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
         out_path, "-y"
     ]
@@ -1862,7 +1876,8 @@ def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio,
 
     stat.text("🔀 Applico crossfade tra le clip...")
     crossfades  = [c.get("crossfade_dur", 1.0) for c in clips_cfg[:-1]]
-    transitions = [c.get("transition_type", "fade") for c in clips_cfg[:-1]]
+    transitions = [random.choice(GLITCH_TRANSITIONS) if c.get("transition_type") == "stile_video"
+                  else c.get("transition_type", "fade") for c in clips_cfg[:-1]]
     for i in range(len(crossfades)):
         max_allowed = min(processed[i]["duration"], processed[i + 1]["duration"]) - 0.2
         crossfades[i] = max(0.1, min(crossfades[i], max_allowed if max_allowed > 0.1 else 0.1))
@@ -1926,6 +1941,70 @@ def apply_effect_preview(frame, effect_type, params):
         return frame
 
 
+def build_session_report(clips_cfg, global_effect, global_params, session_aspect, session_fps,
+                         session_audio_xfade, output_size_mb):
+    """Genera il report bilingue IT/EN per la Sessione Multi-Clip."""
+    res_label = {"16:9": "1280×720 (16:9)", "9:16": "720×1280 (9:16)",
+                "1:1": "720×720 (1:1)", "Originale": "nativa / native"}.get(session_aspect, session_aspect)
+
+    lines_it, lines_en = [], []
+    for i, c in enumerate(clips_cfg):
+        if c.get("mode") == "individuale":
+            eff = c.get("effect_type", global_effect)
+            tag_it, tag_en = "individuale", "individual"
+        else:
+            eff = global_effect
+            tag_it, tag_en = "globale", "global"
+        eff_label = SESSION_EFFECT_LABELS.get(eff, eff)
+        lines_it.append(f"  {i+1}. {c['name']} — effetto {tag_it}: {eff_label}")
+        lines_en.append(f"  {i+1}. {c['name']} — {tag_en} effect: {eff_label}")
+        if i < len(clips_cfg) - 1:
+            tt = c.get("transition_type", "fade")
+            tt_label = SESSION_TRANSITION_LABELS.get(tt, tt)
+            dur = c.get("crossfade_dur", 1.0)
+            lines_it.append(f"     ↔ crossfade {dur}s [{tt_label}] → clip {i+2}")
+            lines_en.append(f"     ↔ crossfade {dur}s [{tt_label}] → clip {i+2}")
+
+    report = f"""[STUDIO_GLITCH_VIDEO] // SESSION_MODE // H.264 // MULTI_CLIP_MONTAGE
+
+══════════════════════════════════
+:: IT — ITALIANO
+══════════════════════════════════
+:: MOTORE: videodistruktor session [v1.1]
+:: PROCESSO: Multi-Clip Crossfade Montage
+
+"Ogni taglio è una scelta. Ogni dissolvenza, una frase."
+
+:: SCHEDA TECNICA SESSIONE
+* Numero clip: {len(clips_cfg)}
+* Risoluzione output: {res_label} @ {session_fps}fps
+* Crossfade audio: {'ON' if session_audio_xfade else 'OFF'}
+* Dimensione output: {output_size_mb} MB
+* Sequenza:
+{chr(10).join(lines_it)}
+
+══════════════════════════════════
+:: EN — ENGLISH
+══════════════════════════════════
+:: ENGINE: videodistruktor session [v1.1]
+:: PROCESS: Multi-Clip Crossfade Montage
+
+"Every cut is a choice. Every dissolve, a sentence."
+
+:: SESSION TECHNICAL LOG SHEET
+* Number of clips: {len(clips_cfg)}
+* Output resolution: {res_label} @ {session_fps}fps
+* Audio crossfade: {'ON' if session_audio_xfade else 'OFF'}
+* Output size: {output_size_mb} MB
+* Sequence:
+{chr(10).join(lines_en)}
+
+> Direction & Algorithm: Loop507
+
+#loop507 #glitchart #videodistruktor #multiclip #crossfade #datacorruption #brutalistart"""
+    return report
+
+
 def render_session_mode():
     if "session_clip_settings" not in st.session_state:
         st.session_state.session_clip_settings = []
@@ -1983,6 +2062,7 @@ def render_session_mode():
                                                            key=f"xf_{entry['key']}")
                     with cx2:
                         entry["transition_type"] = st.selectbox("Tipo transizione", SESSION_TRANSITIONS,
+                                                                format_func=lambda x: SESSION_TRANSITION_LABELS[x],
                                                                 key=f"tt_{entry['key']}")
 
             with prev_col:
@@ -2001,7 +2081,7 @@ def render_session_mode():
                     if ok_p:
                         thumb = apply_effect_preview(frame_p, eff_for_preview, prm_for_preview)
                         h_p, w_p = thumb.shape[:2]
-                        new_w = 220
+                        new_w = 320
                         new_h = int(h_p * (new_w / w_p))
                         thumb_small = cv2.resize(thumb, (new_w, new_h))
                         st.image(cv2.cvtColor(thumb_small, cv2.COLOR_BGR2RGB), caption="anteprima")
@@ -2036,10 +2116,24 @@ def render_session_mode():
         final_path = run_multiclip_session(clips_cfg, global_effect, global_params,
                                            session_aspect, session_fps, session_audio_xfade)
         if final_path:
-            st.video(final_path)
-            with open(final_path, "rb") as f:
-                st.download_button("⬇️ Scarica sessione montata", f, file_name="videodistruktor_session.mp4",
-                                  mime="video/mp4", key="session_download")
+            st.session_state.session_result_path = final_path
+            st.session_state.session_report = build_session_report(
+                clips_cfg, global_effect, global_params, session_aspect, session_fps,
+                session_audio_xfade, get_file_size_mb(final_path)
+            )
+
+    # Persistito in session_state: sopravvive al rerun scatenato dal click sui download_button
+    result_path = st.session_state.get("session_result_path")
+    if result_path and os.path.exists(result_path):
+        st.video(result_path)
+        with open(result_path, "rb") as f:
+            st.download_button("⬇️ Scarica sessione montata", f, file_name="videodistruktor_session.mp4",
+                              mime="video/mp4", key="session_download")
+        if st.session_state.get("session_report"):
+            with st.expander("📄 Report Sessione (IT/EN)", expanded=False):
+                st.text(st.session_state.session_report)
+            st.download_button("⬇️ Scarica Report", st.session_state.session_report,
+                              file_name="report_session.txt", mime="text/plain", key="session_report_download")
 
 
 # Interfaccia Streamlit principale
