@@ -2016,6 +2016,26 @@ def build_session_report(clips_cfg, global_effect, global_params, session_aspect
     return report
 
 
+STREAMLIT_FREE_RAM_MB = 1024   # limite noto del piano free di Streamlit Community Cloud
+BASELINE_APP_RAM_MB = 250      # streamlit + librerie (numpy/opencv/librosa) già caricate in idle, stima prudente
+
+def estimate_session_ram_mb(clips_cfg, aspect_ratio, target_fps):
+    """Stima APPROSSIMATIVA (non una misura esatta) della RAM di picco per il montaggio sessione.
+    Si basa su: risoluzione finale x fps x durata dei crossfade (dove ffmpeg xfade deve tenere
+    in coda i frame della finestra di dissolvenza), più un margine per clip per l'elaborazione
+    effetto/OpenCV. Serve solo per capire se sei vicino al tetto gratuito di Streamlit Cloud (1GB)."""
+    tw, th = SESSION_TARGET_SIZES.get(aspect_ratio, (1280, 720))
+    frame_mb = (tw * th * 3) / (1024 * 1024)  # un frame BGR uint8
+
+    total_mb = BASELINE_APP_RAM_MB
+    for c in clips_cfg[:-1]:
+        xf = c.get("crossfade_dur", 1.0)
+        buffer_frames = xf * target_fps * 2.2  # margine: entrambi gli stream nella finestra di dissolvenza
+        total_mb += buffer_frames * frame_mb
+    total_mb += len(clips_cfg) * frame_mb * 6  # overhead elaborazione per-clip (OpenCV/effetti)
+    return round(total_mb)
+
+
 def render_session_mode():
     if "session_clip_settings" not in st.session_state:
         st.session_state.session_clip_settings = []
@@ -2120,6 +2140,18 @@ def render_session_mode():
         st.warning("⚠️ Carica almeno 2 clip per poter montare una sessione con crossfade.")
         return
 
+    est_ram = estimate_session_ram_mb(clips_cfg, session_aspect, session_fps)
+    pct = est_ram / STREAMLIT_FREE_RAM_MB
+    if pct < 0.5:
+        st.success(f"✅ Stima RAM di picco: ~{est_ram} MB su {STREAMLIT_FREE_RAM_MB} MB disponibili (piano free Streamlit Cloud). Dovrebbe stare comoda.")
+    elif pct < 0.8:
+        st.warning(f"🟡 Stima RAM di picco: ~{est_ram} MB su {STREAMLIT_FREE_RAM_MB} MB disponibili. Vicino al limite: se aggiungi altre clip o alzi risoluzione/crossfade rischi il crash.")
+    else:
+        st.error(f"🔴 Stima RAM di picco: ~{est_ram} MB su {STREAMLIT_FREE_RAM_MB} MB disponibili (piano free Streamlit Cloud). "
+                 "Molto probabile che vada in crash. Riduci: risoluzione (prova 1:1), durata dei crossfade, o numero di clip.")
+    st.caption("⚠️ Stima approssimativa basata su risoluzione, fps e durata dei crossfade — non è una misura esatta, "
+              "ma un indicatore per capire se sei vicino al tetto gratuito di Streamlit Cloud (1GB RAM).")
+
     if st.button("🎬 Genera Sessione", type="primary", key="session_generate"):
         if not check_ffmpeg():
             st.error("❌ FFmpeg non disponibile: impossibile montare la sessione.")
@@ -2127,6 +2159,7 @@ def render_session_mode():
         final_path = run_multiclip_session(clips_cfg, global_effect, global_params,
                                            session_aspect, session_fps, session_audio_xfade)
         if final_path:
+            st.session_state.session_output_counter = st.session_state.get("session_output_counter", 0) + 1
             st.session_state.session_result_path = final_path
             st.session_state.session_report = build_session_report(
                 clips_cfg, global_effect, global_params, session_aspect, session_fps,
@@ -2136,15 +2169,17 @@ def render_session_mode():
     # Persistito in session_state: sopravvive al rerun scatenato dal click sui download_button
     result_path = st.session_state.get("session_result_path")
     if result_path and os.path.exists(result_path):
+        n = st.session_state.get("session_output_counter", 1)
         st.video(result_path)
         with open(result_path, "rb") as f:
-            st.download_button("⬇️ Scarica sessione montata", f, file_name="videodistruktor_session.mp4",
+            st.download_button("⬇️ Scarica sessione montata", f, file_name=f"videodistruktor_session ({n}).mp4",
                               mime="video/mp4", key="session_download")
         if st.session_state.get("session_report"):
             with st.expander("📄 Report Sessione (IT/EN)", expanded=False):
                 st.text(st.session_state.session_report)
             st.download_button("⬇️ Scarica Report", st.session_state.session_report,
-                              file_name="report_session.txt", mime="text/plain", key="session_report_download")
+                              file_name=f"videodistruktor_session ({n}) report.txt", mime="text/plain",
+                              key="session_report_download")
 
 
 # Interfaccia Streamlit principale
