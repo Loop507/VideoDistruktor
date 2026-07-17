@@ -1775,49 +1775,47 @@ def render_mini_effect_picker(key_prefix, default_effect="vhs"):
 
 
 def build_xfade_chain(clips, crossfades, transitions, audio_xfade):
-    """Costruisce ed esegue la catena ffmpeg xfade (video) + acrossfade (audio) tra N clip normalizzate."""
-    n = len(clips)
-    inputs = []
-    for c in clips:
-        inputs += ["-i", c["video"]]
-    if audio_xfade:
-        for c in clips:
-            inputs += ["-i", c["audio"]]
+    """Monta le clip a COPPIE, in sequenza (clip1+clip2 → intermedio, intermedio+clip3 → intermedio2, ...)
+    invece di aprire tutte le clip insieme in un unico filtro N-way. Più lento (un encode in più per
+    ogni clip) ma tiene sempre solo 2 file aperti alla volta: molto più leggero in RAM, importante
+    su ambienti con memoria limitata come Streamlit Cloud free tier."""
+    tmp_dir = tempfile.mkdtemp()
+    current = clips[0]  # {"path": ..., "duration": ...}
 
-    filter_parts = []
-    running = clips[0]["duration"]
-    last_v = "[0:v]"
-    for i in range(1, n):
-        off = max(0.0, running - crossfades[i - 1])
-        out_lbl = f"[v{i}]"
-        filter_parts.append(
-            f"{last_v}[{i}:v]xfade=transition={transitions[i-1]}:duration={crossfades[i-1]:.2f}:offset={off:.3f}{out_lbl}"
-        )
-        running = running + clips[i]["duration"] - crossfades[i - 1]
-        last_v = out_lbl
+    for i in range(1, len(clips)):
+        nxt = clips[i]
+        xf_dur = crossfades[i - 1]
+        trans = transitions[i - 1]
+        off = max(0.0, current["duration"] - xf_dur)
 
-    maps = ["-map", last_v]
-    if audio_xfade:
-        last_a = f"[{n}:a]"
-        for i in range(1, n):
-            out_lbl = f"[a{i}]"
-            filter_parts.append(f"{last_a}[{n+i}:a]acrossfade=d={crossfades[i-1]:.2f}{out_lbl}")
-            last_a = out_lbl
-        maps += ["-map", last_a]
+        filter_complex = f"[0:v][1:v]xfade=transition={trans}:duration={xf_dur:.2f}:offset={off:.3f}[v]"
+        maps = ["-map", "[v]"]
+        acodec_args = []
+        if audio_xfade:
+            filter_complex += f";[0:a][1:a]acrossfade=d={xf_dur:.2f}[a]"
+            maps += ["-map", "[a]"]
+            acodec_args = ["-c:a", "aac", "-b:a", "192k"]
 
-    filter_complex = ";".join(filter_parts)
-    fd, out_path = tempfile.mkstemp(suffix='_session.mp4')
-    os.close(fd)
-    cmd = ["ffmpeg"] + inputs + ["-filter_complex", filter_complex] + maps + [
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-        out_path, "-y"
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        st.error(f"❌ Errore FFmpeg xfade: {result.stderr[-800:]}")
-        return None
-    return out_path
+        out_path = os.path.join(tmp_dir, f"merge_step_{i}.mp4")
+        cmd = ["ffmpeg", "-i", current["path"], "-i", nxt["path"],
+               "-filter_complex", filter_complex] + maps + [
+               "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p"
+              ] + acodec_args + ["-movflags", "+faststart", out_path, "-y"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            st.error(f"❌ Errore FFmpeg xfade (clip {i}→{i+1}): {result.stderr[-800:]}")
+            return None
+
+        new_dur = current["duration"] + nxt["duration"] - xf_dur
+        prev_path = current["path"]
+        current = {"path": out_path, "duration": new_dur}
+        try:
+            os.remove(prev_path)
+            os.remove(nxt["path"])
+        except Exception:
+            pass
+
+    return current["path"]
 
 
 def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio, target_fps, audio_xfade):
@@ -1871,7 +1869,20 @@ def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio,
                 subprocess.run(["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                                "-t", str(dur), aud_path, "-y"], capture_output=True, text=True)
 
-        processed.append({"video": norm_path, "audio": aud_path, "duration": dur})
+        # Video+audio uniti in UN solo file: così build_xfade_chain apre sempre solo 2 file alla volta
+        if audio_xfade and aud_path:
+            muxed_path = os.path.join(tmp_dir, f"muxed_{i}.mp4")
+            mx = subprocess.run(["ffmpeg", "-i", norm_path, "-i", aud_path,
+                               "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                               "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                               muxed_path, "-y"], capture_output=True, text=True)
+            if mx.returncode != 0:
+                st.error(f"❌ Errore muxing audio {entry['name']}: {mx.stderr[-400:]}")
+                return None
+        else:
+            muxed_path = norm_path
+
+        processed.append({"path": muxed_path, "duration": dur})
         prog.progress((i + 1) / (len(clips_cfg) + 1))
 
     stat.text("🔀 Applico crossfade tra le clip...")
