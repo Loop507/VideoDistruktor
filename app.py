@@ -2021,18 +2021,21 @@ BASELINE_APP_RAM_MB = 250      # streamlit + librerie (numpy/opencv/librosa) gi�
 
 def estimate_session_ram_mb(clips_cfg, aspect_ratio, target_fps):
     """Stima APPROSSIMATIVA (non una misura esatta) della RAM di picco per il montaggio sessione.
-    Si basa su: risoluzione finale x fps x durata dei crossfade (dove ffmpeg xfade deve tenere
-    in coda i frame della finestra di dissolvenza), più un margine per clip per l'elaborazione
-    effetto/OpenCV. Serve solo per capire se sei vicino al tetto gratuito di Streamlit Cloud (1GB)."""
+    Il montaggio è sequenziale a coppie (una transizione alla volta), quindi il picco dipende dalla
+    transizione più pesante SINGOLA (risoluzione x fps x durata crossfade), non dalla somma di tutte —
+    più clip aggiungi, più tempo ci vuole, ma non più RAM di picco. Serve solo per capire se sei
+    vicino al tetto gratuito di Streamlit Cloud (1GB)."""
     tw, th = SESSION_TARGET_SIZES.get(aspect_ratio, (1280, 720))
     frame_mb = (tw * th * 3) / (1024 * 1024)  # un frame BGR uint8
 
-    total_mb = BASELINE_APP_RAM_MB
+    max_xfade_buffer_mb = 0.0
     for c in clips_cfg[:-1]:
         xf = c.get("crossfade_dur", 1.0)
         buffer_frames = xf * target_fps * 2.2  # margine: entrambi gli stream nella finestra di dissolvenza
-        total_mb += buffer_frames * frame_mb
-    total_mb += len(clips_cfg) * frame_mb * 6  # overhead elaborazione per-clip (OpenCV/effetti)
+        max_xfade_buffer_mb = max(max_xfade_buffer_mb, buffer_frames * frame_mb)
+
+    per_clip_overhead_mb = frame_mb * 8  # elaborazione OpenCV/effetto: una clip alla volta, non cumulativa
+    total_mb = BASELINE_APP_RAM_MB + max_xfade_buffer_mb + per_clip_overhead_mb
     return round(total_mb)
 
 
@@ -2149,7 +2152,8 @@ def render_session_mode():
     else:
         st.error(f"🔴 Stima RAM di picco: ~{est_ram} MB su {STREAMLIT_FREE_RAM_MB} MB disponibili (piano free Streamlit Cloud). "
                  "Molto probabile che vada in crash. Riduci: risoluzione (prova 1:1), durata dei crossfade, o numero di clip.")
-    st.caption("⚠️ Stima approssimativa basata su risoluzione, fps e durata dei crossfade — non è una misura esatta, "
+    st.caption("⚠️ Stima approssimativa basata su risoluzione, fps e sulla transizione più lunga tra le clip "
+              "(il montaggio è sequenziale, quindi più clip non significa più RAM di picco) — non è una misura esatta, "
               "ma un indicatore per capire se sei vicino al tetto gratuito di Streamlit Cloud (1GB RAM).")
 
     if st.button("🎬 Genera Sessione", type="primary", key="session_generate"):
