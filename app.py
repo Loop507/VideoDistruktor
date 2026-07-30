@@ -2769,16 +2769,17 @@ if uploaded_file is not None:
             use_keyframes = st.toggle("⏱️ Animazione intensità",
                 help="Interpola l'intensità dall'inizio alla fine del video.")
             if use_keyframes:
-                ck1, ck2 = st.columns(2)
-                with ck1: kf_start = st.slider("Intensità inizio", 0.0, 3.0, 0.5, 0.1, key="kf_start")
-                with ck2: kf_end   = st.slider("Intensità fine",   0.0, 3.0, 1.5, 0.1, key="kf_end")
+                ck1, ck2, ck3 = st.columns(3)
+                with ck1: kf_start = st.slider("Intensità inizio",  0.0, 3.0, 0.5, 0.1, key="kf_start")
+                with ck2: kf_mid   = st.slider("Intensità Centro (metà del tempo)", 0.0, 3.0, 1.0, 0.1, key="kf_mid")
+                with ck3: kf_end   = st.slider("Intensità fine",    0.0, 3.0, 1.5, 0.1, key="kf_end")
                 import pandas as pd
                 cap_tmp = cv2.VideoCapture(video_path)
                 fps_tmp  = cap_tmp.get(cv2.CAP_PROP_FPS) or 24
                 frames_tmp = cap_tmp.get(cv2.CAP_PROP_FRAME_COUNT) or 0
                 cap_tmp.release()
                 dur_est = round(frames_tmp / fps_tmp, 1) if fps_tmp > 0 else 10.0
-                kf_df = pd.DataFrame({"Secondo": [0.0, dur_est], "Intensita'": [kf_start, kf_end]})
+                kf_df = pd.DataFrame({"Secondo": [0.0, dur_est / 2, dur_est], "Intensita'": [kf_start, kf_mid, kf_end]})
 
         # ── PROPORZIONI EXPORT ───────────────────────────────────
         aspect_ratio = st.radio("📐 Formato output:",
