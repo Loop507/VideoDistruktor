@@ -113,6 +113,7 @@ def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity
     # Strategia per effetto: quale parametro è pilotato da cosa
     STRATEGIES = {
         'pixel_sort':    [('rms', 0), ('high_freq', 1)],   # intensità↑ con rms, soglia↑ con high
+        'bitmap_sort':   [('rms', 0), ('high_freq', 1)],   # stessa logica di pixel_sort
         'channel_shift': [('rms', 0), ('beats', 1)],
         'datamosh':      [('low_freq', 0), ('rms', 2)],     # blocchi grandi sui bassi, chaos su rms
         'byte_corrupt':  [('rms', 0), ('beats', 1)],
@@ -569,6 +570,39 @@ def glitch_pixel_sort(frame, intensity=1.0, threshold=0.5, direction=0.5):
                     order = np.argsort(lum)
                     arr[s:e, x] = seg[order]
         return arr
+    except Exception:
+        return frame
+
+def glitch_bitmap_sort(frame, intensity=1.0, threshold=0.3, direction=0.3):
+    """Bitmap sort (algoritmo larixk, MIT): swap locale iterato tra pixel adiacenti quando la
+    differenza di luminosità supera una soglia. Diverso da glitch_pixel_sort (che ordina interi
+    segmenti contigui): qui lo scambio è locale e produce un pattern di 'colatura' verticale o
+    orizzontale, non bande ordinate."""
+    try:
+        arr = frame.astype(np.float32)
+        thr_255 = np.clip(threshold, 0.01, 1.0) * 255.0
+        iterations = int(np.clip(round(1 + intensity), 1, 6))
+        blend = float(np.clip(0.5 + 0.3 * intensity, 0.0, 1.0))
+        vertical = direction < 0.5
+
+        for _ in range(iterations):
+            luminance = arr.mean(axis=2)
+            if vertical:
+                diff = np.abs(luminance[:-1, :] - luminance[1:, :])
+                mask = diff > thr_255
+                top    = arr[:-1, :][mask]
+                bottom = arr[1:, :][mask]
+                arr[:-1, :][mask] = top * (1 - blend) + bottom * blend
+                arr[1:, :][mask]  = bottom * (1 - blend) + top * blend
+            else:
+                diff = np.abs(luminance[:, :-1] - luminance[:, 1:])
+                mask = diff > thr_255
+                left  = arr[:, :-1][mask]
+                right = arr[:, 1:][mask]
+                arr[:, :-1][mask] = left * (1 - blend) + right * blend
+                arr[:, 1:][mask]  = right * (1 - blend) + left * blend
+
+        return np.clip(arr, 0, 255).astype(np.uint8)
     except Exception:
         return frame
 
@@ -1313,6 +1347,7 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
 
             fn_map = {
                 'pixel_sort':    lambda f: glitch_pixel_sort(f, *cp),
+                'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *cp),
                 'channel_shift': lambda f: glitch_channel_shift(f, *cp),
                 'datamosh':      lambda f: glitch_datamosh(f, prev_frame, *cp),
                 'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *cp),
@@ -1691,6 +1726,7 @@ def build_report(original_name, original_size_mb, output_size_mb,
 SESSION_EFFECT_PARAM_SPEC = {
     # effetto: [(label, min, max, default, step), ...] — stessi valori della UI video-singolo
     'pixel_sort':    [("Intensità",0.1,3.0,1.0,0.1), ("Soglia luma",0.1,1.0,0.5,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
+    'bitmap_sort':   [("Intensità",0.1,3.0,1.0,0.1), ("Soglia",0.05,1.0,0.3,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
     'channel_shift': [("Intensità",0.1,3.0,1.0,0.1), ("Spread",0.1,3.0,1.0,0.1), ("Verticale",0.0,1.0,0.3,0.05)],
     'datamosh':      [("Intensità",0.1,3.0,1.0,0.1), ("Block size",0.1,3.0,1.0,0.1), ("Chaos",0.1,3.0,1.0,0.1)],
     'byte_corrupt':  [("Intensità",0.1,3.0,1.0,0.1), ("Chunk size",0.1,3.0,1.0,0.1), ("Random",0.0,1.0,0.7,0.05)],
@@ -1714,7 +1750,7 @@ SESSION_EFFECT_PARAM_SPEC = {
 }
 SESSION_EFFECTS = list(SESSION_EFFECT_PARAM_SPEC.keys()) + ['combined', 'random']
 SESSION_EFFECT_LABELS = {
-    "pixel_sort":"🔀 Pixel Sort", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
+    "pixel_sort":"🔀 Pixel Sort", "bitmap_sort":"🧬 Bitmap Sort", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
     "byte_corrupt":"🦠 Byte Corrupt", "slice_shift":"✂️ Slice Shift", "echo_smear":"👻 Echo Smear",
     "rgb_wave":"🌊 RGB Wave", "mirror_blocks":"🪞 Mirror Blocks", "color_quantize":"🎨 Color Quantize",
     "moire":"🕸️ Moiré Pattern", "feedback_loop":"🔁 Feedback Loop", "pixel_drift":"💧 Pixel Drift",
@@ -1935,6 +1971,7 @@ def apply_effect_preview(frame, effect_type, params):
             return fn[chosen](frame, *rp)
         fn_map = {
             'pixel_sort':    lambda f: glitch_pixel_sort(f, *params),
+            'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *params),
             'channel_shift': lambda f: glitch_channel_shift(f, *params),
             'datamosh':      lambda f: glitch_datamosh(f, f, *params),
             'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *params),
@@ -2234,13 +2271,14 @@ if uploaded_file is not None:
         # ── EFFETTO ──────────────────────────────────────────────
         effect_type = st.selectbox(
             "🎭 Effetto glitch:",
-            ["pixel_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
+            ["pixel_sort", "bitmap_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
              "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
              "moire", "feedback_loop", "pixel_drift",
              "slit_scan", "thermal", "ascii_glitch", "halftone", "chroma_pulse",
              "vhs", "broken_tv", "noise", "distruttivo", "combined", "random"],
             format_func=lambda x: {
                 "pixel_sort":    "🔀 Pixel Sort",
+                "bitmap_sort":   "🧬 Bitmap Sort",
                 "channel_shift": "🌈 Channel Shift",
                 "datamosh":      "💾 Datamosh",
                 "byte_corrupt":  "🦠 Byte Corrupt",
@@ -2276,6 +2314,13 @@ if uploaded_file is not None:
             with c2: ps_threshold = st.slider("Soglia luma", 0.1, 1.0, 0.5, 0.05)
             with c3: ps_direction = st.slider("Direzione", 0.0, 1.0, 0.3, 0.05)
             params = (ps_intensity, ps_threshold, ps_direction)
+
+        elif effect_type == 'bitmap_sort':
+            c1,c2,c3 = st.columns(3)
+            with c1: bs_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: bs_threshold = st.slider("Soglia", 0.05, 1.0, 0.3, 0.05)
+            with c3: bs_direction = st.slider("Direzione", 0.0, 1.0, 0.3, 0.05)
+            params = (bs_intensity, bs_threshold, bs_direction)
 
         elif effect_type == 'channel_shift':
             c1,c2,c3 = st.columns(3)
@@ -2751,6 +2796,8 @@ if uploaded_file is not None:
             if ret_live:
                 if effect_type == 'pixel_sort':
                     pf = glitch_pixel_sort(frame_live, *params)
+                elif effect_type == 'bitmap_sort':
+                    pf = glitch_bitmap_sort(frame_live, *params)
                 elif effect_type == 'channel_shift':
                     pf = glitch_channel_shift(frame_live, *params)
                 elif effect_type == 'datamosh':
@@ -2913,7 +2960,7 @@ if uploaded_file is not None:
 
                 video_stem   = os.path.splitext(uploaded_file.name)[0]
                 effect_label = {
-                    "pixel_sort":"PixelSort","channel_shift":"ChannelShift",
+                    "pixel_sort":"PixelSort","bitmap_sort":"BitmapSort","channel_shift":"ChannelShift",
                     "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
                     "slice_shift":"SliceShift","echo_smear":"EchoSmear",
                     "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
