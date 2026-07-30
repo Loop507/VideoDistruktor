@@ -904,11 +904,15 @@ def glitch_noise_frame(frame, noise_intensity=1.0, coverage=1.0, chaos=1.0):
     except Exception:
         return frame
 
-def glitch_distruttivo_frame(frame, block_size=1.0, num_blocks=1.0, displacement=1.0):
-    """Distruttivo: block glitch + inversion + channel swap."""
+def glitch_distruttivo_frame(frame, intensity=1.0, num_blocks=1.0, block_size=1.0):
+    """Distruttivo: block glitch + inversion + channel swap. 'intensity' guida il
+    displacement (quanto è 'forte' il glitch) — così l'Animazione Intensità (che
+    sovrascrive sempre il primo parametro) anima davvero la forza dell'effetto,
+    non la dimensione dei blocchi."""
     try:
         arr = frame.copy()
         h, w = arr.shape[:2]
+        displacement = intensity
         bw = max(4, int(10 + 60 * block_size))
         bh = max(4, int(6 + 40 * block_size))
         n = max(1, int(3 + 20 * num_blocks))
@@ -1500,7 +1504,7 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
             elif effect_type == 'combined':
                 cf = frame.copy()
                 if params.get("apply_vhs"):         cf = glitch_vhs_frame(cf, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
-                if params.get("apply_distruttivo"): cf = glitch_distruttivo_frame(cf, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+                if params.get("apply_distruttivo"): cf = glitch_distruttivo_frame(cf, params.get("dest_displacement",1.0), params.get("dest_num_blocks",1.0), params.get("dest_block_size",1.0))
                 if params.get("apply_noise"):       cf = glitch_noise_frame(cf, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
                 if params.get("apply_broken_tv"):   cf = glitch_broken_tv_frame(cf, params.get("tv_shift_intensity",1.0), params.get("tv_line_height",1.0), params.get("tv_flicker_prob",1.0))
                 if params.get("apply_pixel_sort"):  cf = glitch_pixel_sort(cf, params.get("ps_intensity",1.0), params.get("ps_threshold",0.5), params.get("ps_direction",0.3))
@@ -1750,7 +1754,7 @@ PARAM_LABELS = {
     'halftone':      [("Intensita'","Intensity"), ("Dot size","Dot size"), ("Angolo","Angle")],
     'chroma_pulse':  [("Intensita'","Intensity"), ("Radiale","Radial"), ("Pulse speed","Pulse speed")],
     'vhs':           [("Intensita'","Intensity"), ("Scanline","Scanline"), ("Color shift","Color shift")],
-    'distruttivo':   [("Block size","Block size"), ("Num blocks","Block count"), ("Displacement","Displacement")],
+    'distruttivo':   [("Intensità","Intensity"), ("Num blocks","Block count"), ("Block size","Block size")],
     'noise':         [("Intensita'","Intensity"), ("Coverage","Coverage"), ("Chaos","Chaos")],
     'broken_tv':     [("Shift","Shift"), ("Line height","Line height"), ("Flicker","Flicker")],
 }
@@ -1873,7 +1877,7 @@ SESSION_EFFECT_PARAM_SPEC = {
     'halftone':      [("Intensità",0.1,3.0,1.0,0.1), ("Dot size",0.1,1.0,0.5,0.05), ("Angolo",0.0,1.0,0.3,0.05)],
     'chroma_pulse':  [("Intensità",0.1,3.0,1.0,0.1), ("Radiale",0.0,1.0,0.5,0.05), ("Pulse speed",0.1,3.0,1.0,0.1)],
     'vhs':           [("Intensità",0.1,3.0,1.0,0.1), ("Scanline",0.1,3.0,1.0,0.1), ("Color shift",0.1,3.0,1.0,0.1)],
-    'distruttivo':   [("Block size",0.1,3.0,1.0,0.1), ("Num blocks",0.1,3.0,1.0,0.1), ("Displacement",0.1,3.0,1.0,0.1)],
+    'distruttivo':   [("Intensità",0.1,3.0,1.0,0.1), ("Num blocks",0.1,3.0,1.0,0.1), ("Block size",0.1,3.0,1.0,0.1)],
     'noise':         [("Intensità",0.1,3.0,1.0,0.1), ("Coverage",0.1,3.0,1.0,0.1), ("Chaos",0.1,3.0,1.0,0.1)],
     'broken_tv':     [("Shift",0.1,3.0,1.0,0.1), ("Line height",0.1,3.0,1.0,0.1), ("Flicker",0.1,3.0,1.0,0.1)],
 }
@@ -2084,7 +2088,7 @@ def apply_effect_preview(frame, effect_type, params):
             if params.get("apply_vhs"):
                 pf = glitch_vhs_frame(pf, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
             if params.get("apply_distruttivo"):
-                pf = glitch_distruttivo_frame(pf, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+                pf = glitch_distruttivo_frame(pf, params.get("dest_displacement",1.0), params.get("dest_num_blocks",1.0), params.get("dest_block_size",1.0))
             if params.get("apply_noise"):
                 pf = glitch_noise_frame(pf, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
             if params.get("apply_broken_tv"):
@@ -2620,10 +2624,10 @@ if uploaded_file is not None:
 
         elif effect_type == 'distruttivo':
             c1,c2,c3 = st.columns(3)
-            with c1: block_size   = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
-            with c2: num_blocks   = st.slider("Num blocks", 0.1, 3.0, 1.0, 0.1)
-            with c3: displacement = st.slider("Displacement", 0.1, 3.0, 1.0, 0.1)
-            params = (block_size, num_blocks, displacement)
+            with c1: dst_intensity  = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: num_blocks     = st.slider("Num blocks", 0.1, 3.0, 1.0, 0.1)
+            with c3: block_size     = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
+            params = (dst_intensity, num_blocks, block_size)
 
         elif effect_type == 'noise':
             c1,c2,c3 = st.columns(3)
@@ -3027,7 +3031,7 @@ if uploaded_file is not None:
                     if params.get("apply_vhs"):
                         pf = glitch_vhs_frame(pf, params.get("vhs_intensity",1.0), params.get("vhs_scanline_freq",1.0), params.get("vhs_color_shift",1.0))
                     if params.get("apply_distruttivo"):
-                        pf = glitch_distruttivo_frame(pf, params.get("dest_block_size",1.0), params.get("dest_num_blocks",1.0), params.get("dest_displacement",1.0))
+                        pf = glitch_distruttivo_frame(pf, params.get("dest_displacement",1.0), params.get("dest_num_blocks",1.0), params.get("dest_block_size",1.0))
                     if params.get("apply_noise"):
                         pf = glitch_noise_frame(pf, params.get("noise_intensity",1.0), params.get("noise_coverage",1.0), params.get("noise_chaos",1.0))
                     if params.get("apply_broken_tv"):
