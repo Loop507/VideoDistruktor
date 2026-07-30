@@ -576,34 +576,43 @@ def glitch_pixel_sort(frame, intensity=1.0, threshold=0.5, direction=0.5):
     except Exception:
         return frame
 
-def glitch_bitmap_sort(frame, intensity=1.0, threshold=0.3, direction=0.3):
-    """Bitmap sort (algoritmo larixk, MIT): swap locale iterato tra pixel adiacenti quando la
-    differenza di luminosità supera una soglia. Diverso da glitch_pixel_sort (che ordina interi
-    segmenti contigui): qui lo scambio è locale e produce un pattern di 'colatura' verticale o
-    orizzontale, non bande ordinate."""
+def glitch_bitmap_sort(frame, intensity=1.0, threshold=0.08, direction=0.3):
+    """Bitmap sort (algoritmo larixk, MIT) — versione a PROPAGAZIONE SEQUENZIALE: ogni riga
+    (o colonna) aggiornata influenza subito il confronto con la successiva, nella stessa
+    passata. Questo crea il vero effetto 'a cascata/scioglimento' (i pixel colano lungo la
+    direzione di scan), a differenza di uno swap 'parallelo' che si stabilizza troppo in
+    fretta e resta un pattern locale invece che una colatura estesa.
+    NOTA PERFORMANCE: essendo sequenziale (loop riga-per-riga o colonna-per-colonna, non
+    vettorizzabile del tutto), è ~15-20x più lento della versione a swap parallelo — su
+    video lunghi/HD il render richiederà più tempo."""
     try:
-        arr = frame.astype(np.float32)
+        arr = frame.astype(np.float32).copy()
         thr_255 = np.clip(threshold, 0.01, 1.0) * 255.0
-        iterations = int(np.clip(round(1 + intensity), 1, 6))
         blend = float(np.clip(0.5 + 0.3 * intensity, 0.0, 1.0))
+        passes = int(np.clip(round(1 + intensity * 0.7), 1, 4))
         vertical = direction < 0.5
 
-        for _ in range(iterations):
-            luminance = arr.mean(axis=2)
+        for _ in range(passes):
             if vertical:
-                diff = np.abs(luminance[:-1, :] - luminance[1:, :])
-                mask = diff > thr_255
-                top    = arr[:-1, :][mask]
-                bottom = arr[1:, :][mask]
-                arr[:-1, :][mask] = top * (1 - blend) + bottom * blend
-                arr[1:, :][mask]  = bottom * (1 - blend) + top * blend
+                h = arr.shape[0]
+                for y in range(h - 1):
+                    row_a = arr[y, :].copy()
+                    row_b = arr[y + 1, :].copy()
+                    lum_a = row_a.mean(axis=1)
+                    lum_b = row_b.mean(axis=1)
+                    mask = np.abs(lum_a - lum_b) > thr_255
+                    arr[y, :][mask]     = row_a[mask] * (1 - blend) + row_b[mask] * blend
+                    arr[y + 1, :][mask] = row_b[mask] * (1 - blend) + row_a[mask] * blend
             else:
-                diff = np.abs(luminance[:, :-1] - luminance[:, 1:])
-                mask = diff > thr_255
-                left  = arr[:, :-1][mask]
-                right = arr[:, 1:][mask]
-                arr[:, :-1][mask] = left * (1 - blend) + right * blend
-                arr[:, 1:][mask]  = right * (1 - blend) + left * blend
+                w = arr.shape[1]
+                for x in range(w - 1):
+                    col_a = arr[:, x].copy()
+                    col_b = arr[:, x + 1].copy()
+                    lum_a = col_a.mean(axis=1)
+                    lum_b = col_b.mean(axis=1)
+                    mask = np.abs(lum_a - lum_b) > thr_255
+                    arr[:, x][mask]     = col_a[mask] * (1 - blend) + col_b[mask] * blend
+                    arr[:, x + 1][mask] = col_b[mask] * (1 - blend) + col_a[mask] * blend
 
         return np.clip(arr, 0, 255).astype(np.uint8)
     except Exception:
