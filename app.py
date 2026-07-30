@@ -115,8 +115,8 @@ def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity
         'pixel_sort':    [('rms', 0), ('high_freq', 1)],   # intensità↑ con rms, soglia↑ con high
         'bitmap_sort':   [('rms', 0), ('high_freq', 1)],   # stessa logica di pixel_sort
         'rutt_etra':     [('rms', 0), ('low_freq', 2)],    # intensità↑ con rms, displacement↑ con bassi
-        'pixelock':      [('beats', 0)],                    # shuffle intensifica sui beat
-        'c64':           [('rms', 0), ('high_freq', 1)],    # blend↑ con rms, dither↑ con high
+        'block_cipher':      [('beats', 0)],                    # shuffle intensifica sui beat
+        'retro_palette':           [('rms', 0), ('high_freq', 1)],    # blend↑ con rms, dither↑ con high
         'channel_shift': [('rms', 0), ('beats', 1)],
         'datamosh':      [('low_freq', 0), ('rms', 2)],     # blocchi grandi sui bassi, chaos su rms
         'byte_corrupt':  [('rms', 0), ('beats', 1)],
@@ -184,8 +184,8 @@ st.set_page_config(page_title="VideoDistruktor by loop507", layout="wide")
 st.markdown("<h1>🎬🔥 VideoDistruktor <span style='font-size:0.5em;'>by loop507</span></h1>", unsafe_allow_html=True)
 st.write("Carica un video e distruggi: VHS, Distruttivo, Noise, Combinato, Broken TV e molto altro. **Audio reactive, keyframe, glitch audio su 4 modalità.**")
 
-# File uploader per video — unico punto di ingresso
-uploaded_file = st.file_uploader("📁 Carica un video", type=["mp4", "avi", "mov", "mkv"])
+# File uploader per video O foto statica — unico punto di ingresso
+uploaded_file = st.file_uploader("📁 Carica un video o una foto", type=["mp4", "avi", "mov", "mkv", "jpg", "jpeg", "png"])
 
 # Controlla se ffmpeg è disponibile (cached per evitare subprocess ad ogni re-run)
 @st.cache_data
@@ -611,34 +611,34 @@ def glitch_bitmap_sort(frame, intensity=1.0, threshold=0.3, direction=0.3):
 
 def glitch_rutt_etra(frame, intensity=1.0, line_spacing=1.0, displacement=1.0):
     """Emulazione Rutt-Etra (scan processor video anni '70, tecnica di dominio pubblico):
-    ogni scanline è ridisegnata come polilinea la cui posizione verticale è spinta dalla
-    luminosità locale (le zone chiare 'tirano su' il raster) — il classico wireframe
-    pseudo-3D del synth video analogico."""
+    ogni scanline viene ridisegnata con la posizione verticale spinta dalla luminosità
+    locale, mantenendo il colore REALE per-pixel (non una media di riga) e una densità di
+    linee alta — così l'intero frame viene trasformato, non solo un'area isolata."""
     try:
         h, w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-        step = int(np.clip(round(18 / max(0.2, line_spacing)), 2, 60))
+        step = int(np.clip(round(6 / max(0.2, line_spacing)), 1, 20))
         max_disp = displacement * (h * 0.15)
         canvas = np.zeros_like(frame)
-
         xs = np.arange(w)
+
         for y in range(0, h, step):
             lum_row = gray[y, :]
             new_ys = np.clip(y - lum_row * max_disp, 0, h - 1).astype(np.int32)
-            colors = frame[y, :]
-            pts = np.stack([xs, new_ys], axis=1).reshape(-1, 1, 2)
-            avg_color = tuple(int(c) for c in colors.mean(axis=0))
-            cv2.polylines(canvas, [pts], isClosed=False, color=avg_color, thickness=1, lineType=cv2.LINE_AA)
+            colors = frame[y, :]  # colore reale per-pixel della riga sorgente
+            canvas[new_ys, xs] = colors
+            ys_plus = np.clip(new_ys + 1, 0, h - 1)
+            canvas[ys_plus, xs] = colors  # piccolo spessore per continuità visiva
 
-        blend = float(np.clip(0.3 + 0.5 * intensity, 0.0, 1.0))
+        blend = float(np.clip(0.4 + 0.5 * intensity, 0.0, 1.0))
         return cv2.addWeighted(frame, 1 - blend, canvas, blend, 0)
     except Exception:
         return frame
 
-def glitch_pixelock(frame, intensity=1.0, key=0.3, block_size=1.0):
-    """Scramble reversibile a blocchi, seedato da una 'chiave' (0-1) — ispirato al concetto
-    di Pixelock di J. Babini (encryption-like glitch: stessa chiave = stesso pattern).
-    Non è una replica del suo codice, che non è pubblicato."""
+def glitch_block_cipher(frame, intensity=1.0, key=0.3, block_size=1.0):
+    """Scramble reversibile a blocchi, seedato da una 'chiave' (0-1): stessa chiave = stesso
+    pattern, chiave diversa = pattern diverso — tecnica generica di block-shuffle seedato,
+    non legata a un prodotto o codice specifico di terzi."""
     try:
         arr = frame.copy()
         h, w = arr.shape[:2]
@@ -652,7 +652,9 @@ def glitch_pixelock(frame, intensity=1.0, key=0.3, block_size=1.0):
 
         n_blocks = gh * gw
         frac = np.clip(intensity / 3.0, 0.05, 0.95)
-        n_shuffle = max(2, int(n_blocks * frac))
+        n_shuffle = min(n_blocks, max(2, int(n_blocks * frac))) if n_blocks >= 2 else 0
+        if n_shuffle < 2:
+            return frame
 
         idx_pool = rng.choice(n_blocks, size=n_shuffle, replace=False)
         perm = rng.permutation(idx_pool)
@@ -673,7 +675,7 @@ def glitch_pixelock(frame, intensity=1.0, key=0.3, block_size=1.0):
 
 # Palette Commodore 64 (16 colori, valori RGB misurati da Philip "Pepto" Timmermann —
 # dati tecnici di riferimento standard, non contenuto creativo)
-C64_PALETTE = np.array([
+RETRO_PALETTE_16 = np.array([
     [0,0,0],[255,255,255],[104,55,43],[112,164,178],
     [111,61,134],[88,141,67],[53,40,121],[184,199,111],
     [111,79,37],[67,57,0],[154,103,89],[68,68,68],
@@ -687,8 +689,8 @@ _BAYER4 = np.array([
     [15, 7,13, 5]
 ], dtype=np.float32) / 16.0 - 0.5
 
-def glitch_c64(frame, intensity=1.0, dither=0.5, pixel_size=1.0):
-    """C64 Yourself: pixelizzazione + quantizzazione sulla palette fissa a 16 colori del
+def glitch_retro_palette(frame, intensity=1.0, dither=0.5, pixel_size=1.0):
+    """Retro Palette 16: pixelizzazione + quantizzazione sulla palette fissa a 16 colori del
     Commodore 64, con dithering ordinato (Bayer) opzionale. Il quantizing avviene
     sull'immagine già pixelizzata (bassa risoluzione) per performance — evita di calcolare
     le distanze-palette su ogni pixel dell'immagine intera."""
@@ -706,9 +708,9 @@ def glitch_c64(frame, intensity=1.0, dither=0.5, pixel_size=1.0):
             rgb = rgb + tile[..., None] * spread
 
         flat = rgb.reshape(-1, 3)
-        dists = np.sum((flat[:, None, :] - C64_PALETTE[None, :, :]) ** 2, axis=2)
+        dists = np.sum((flat[:, None, :] - RETRO_PALETTE_16[None, :, :]) ** 2, axis=2)
         nearest = np.argmin(dists, axis=1)
-        quantized_small = C64_PALETTE[nearest].reshape(sh, sw, 3).astype(np.uint8)
+        quantized_small = RETRO_PALETTE_16[nearest].reshape(sh, sw, 3).astype(np.uint8)
 
         quantized_bgr_small = cv2.cvtColor(quantized_small, cv2.COLOR_RGB2BGR)
         pixelated = cv2.resize(quantized_bgr_small, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -1461,8 +1463,8 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 'pixel_sort':    lambda f: glitch_pixel_sort(f, *cp),
                 'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *cp),
                 'rutt_etra':     lambda f: glitch_rutt_etra(f, *cp),
-                'pixelock':      lambda f: glitch_pixelock(f, *cp),
-                'c64':           lambda f: glitch_c64(f, *cp),
+                'block_cipher':      lambda f: glitch_block_cipher(f, *cp),
+                'retro_palette':           lambda f: glitch_retro_palette(f, *cp),
                 'channel_shift': lambda f: glitch_channel_shift(f, *cp),
                 'datamosh':      lambda f: glitch_datamosh(f, prev_frame, *cp),
                 'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *cp),
@@ -1843,8 +1845,8 @@ SESSION_EFFECT_PARAM_SPEC = {
     'pixel_sort':    [("Intensità",0.1,3.0,1.0,0.1), ("Soglia luma",0.1,1.0,0.5,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
     'bitmap_sort':   [("Intensità",0.1,3.0,1.0,0.1), ("Soglia",0.05,1.0,0.3,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
     'rutt_etra':     [("Intensità",0.1,3.0,1.0,0.1), ("Spaziatura linee",0.1,3.0,1.0,0.1), ("Displacement",0.1,3.0,1.0,0.1)],
-    'pixelock':      [("Intensità",0.1,3.0,1.0,0.1), ("Chiave",0.0,1.0,0.3,0.01), ("Block size",0.1,3.0,1.0,0.1)],
-    'c64':           [("Intensità",0.1,3.0,1.0,0.1), ("Dither",0.0,1.0,0.5,0.05), ("Pixel size",0.1,3.0,1.0,0.1)],
+    'block_cipher':      [("Intensità",0.1,3.0,1.0,0.1), ("Chiave",0.0,1.0,0.3,0.01), ("Block size",0.1,3.0,1.0,0.1)],
+    'retro_palette':           [("Intensità",0.1,3.0,1.0,0.1), ("Dither",0.0,1.0,0.5,0.05), ("Pixel size",0.1,3.0,1.0,0.1)],
     'channel_shift': [("Intensità",0.1,3.0,1.0,0.1), ("Spread",0.1,3.0,1.0,0.1), ("Verticale",0.0,1.0,0.3,0.05)],
     'datamosh':      [("Intensità",0.1,3.0,1.0,0.1), ("Block size",0.1,3.0,1.0,0.1), ("Chaos",0.1,3.0,1.0,0.1)],
     'byte_corrupt':  [("Intensità",0.1,3.0,1.0,0.1), ("Chunk size",0.1,3.0,1.0,0.1), ("Random",0.0,1.0,0.7,0.05)],
@@ -1868,7 +1870,7 @@ SESSION_EFFECT_PARAM_SPEC = {
 }
 SESSION_EFFECTS = list(SESSION_EFFECT_PARAM_SPEC.keys()) + ['combined', 'random']
 SESSION_EFFECT_LABELS = {
-    "pixel_sort":"🔀 Pixel Sort", "bitmap_sort":"🧬 Bitmap Sort", "rutt_etra":"📉 Rutt-Etra", "pixelock":"🔐 Pixelock", "c64":"🕹️ C64 Yourself", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
+    "pixel_sort":"🔀 Pixel Sort", "bitmap_sort":"🧬 Bitmap Sort", "rutt_etra":"📉 Rutt-Etra", "block_cipher":"🔐 Block Cipher Glitch", "retro_palette":"🕹️ Retro Palette 16", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
     "byte_corrupt":"🦠 Byte Corrupt", "slice_shift":"✂️ Slice Shift", "echo_smear":"👻 Echo Smear",
     "rgb_wave":"🌊 RGB Wave", "mirror_blocks":"🪞 Mirror Blocks", "color_quantize":"🎨 Color Quantize",
     "moire":"🕸️ Moiré Pattern", "feedback_loop":"🔁 Feedback Loop", "pixel_drift":"💧 Pixel Drift",
@@ -2091,8 +2093,8 @@ def apply_effect_preview(frame, effect_type, params):
             'pixel_sort':    lambda f: glitch_pixel_sort(f, *params),
             'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *params),
             'rutt_etra':     lambda f: glitch_rutt_etra(f, *params),
-            'pixelock':      lambda f: glitch_pixelock(f, *params),
-            'c64':           lambda f: glitch_c64(f, *params),
+            'block_cipher':      lambda f: glitch_block_cipher(f, *params),
+            'retro_palette':           lambda f: glitch_retro_palette(f, *params),
             'channel_shift': lambda f: glitch_channel_shift(f, *params),
             'datamosh':      lambda f: glitch_datamosh(f, f, *params),
             'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *params),
@@ -2380,10 +2382,31 @@ if uploaded_file is not None:
     if not ffmpeg_available:
         st.warning("⚠️ FFmpeg non disponibile — effetti audio disabilitati.")
 
-    # Salva il file video in temp
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        video_path = tmp_file.name
+    _ext = os.path.splitext(uploaded_file.name)[1].lower()
+    _is_photo = _ext in (".jpg", ".jpeg", ".png")
+
+    if _is_photo:
+        st.info("📷 Foto rilevata — verrà generato un video animando l'effetto nel tempo.")
+        c_dur, c_fps = st.columns(2)
+        with c_dur: _photo_duration = st.slider("Durata video (sec)", 2.0, 30.0, 6.0, 0.5)
+        with c_fps: _photo_fps = st.slider("FPS", 12, 30, 24, 1)
+
+        _pil_img = Image.open(uploaded_file).convert("RGB")
+        _photo_frame = pil_to_frame(_pil_img)
+        _ph, _pw = _photo_frame.shape[:2]
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+            video_path = tmp_file.name
+        _fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        _writer = cv2.VideoWriter(video_path, _fourcc, _photo_fps, (_pw, _ph))
+        for _ in range(int(_photo_duration * _photo_fps)):
+            _writer.write(_photo_frame)
+        _writer.release()
+    else:
+        # Salva il file video in temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            video_path = tmp_file.name
 
     # ─── LAYOUT 2 COLONNE: sinistra=controlli, destra=anteprima ───
     col_ctrl, col_prev = st.columns([1, 1], gap="large")
@@ -2392,7 +2415,7 @@ if uploaded_file is not None:
         # ── EFFETTO ──────────────────────────────────────────────
         effect_type = st.selectbox(
             "🎭 Effetto glitch:",
-            ["pixel_sort", "bitmap_sort", "rutt_etra", "pixelock", "c64", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
+            ["pixel_sort", "bitmap_sort", "rutt_etra", "block_cipher", "retro_palette", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
              "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
              "moire", "feedback_loop", "pixel_drift",
              "slit_scan", "thermal", "ascii_glitch", "halftone", "chroma_pulse",
@@ -2401,8 +2424,8 @@ if uploaded_file is not None:
                 "pixel_sort":    "🔀 Pixel Sort",
                 "bitmap_sort":   "🧬 Bitmap Sort",
                 "rutt_etra":     "📉 Rutt-Etra",
-                "pixelock":      "🔐 Pixelock",
-                "c64":           "🕹️ C64 Yourself",
+                "block_cipher":  "🔐 Block Cipher Glitch",
+                "retro_palette": "🕹️ Retro Palette 16",
                 "channel_shift": "🌈 Channel Shift",
                 "datamosh":      "💾 Datamosh",
                 "byte_corrupt":  "🦠 Byte Corrupt",
@@ -2453,19 +2476,19 @@ if uploaded_file is not None:
             with c3: re_disp      = st.slider("Displacement", 0.1, 3.0, 1.0, 0.1)
             params = (re_intensity, re_spacing, re_disp)
 
-        elif effect_type == 'pixelock':
+        elif effect_type == 'block_cipher':
             c1,c2,c3 = st.columns(3)
-            with c1: pl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-            with c2: pl_key       = st.slider("Chiave", 0.0, 1.0, 0.3, 0.01)
-            with c3: pl_block     = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
-            params = (pl_intensity, pl_key, pl_block)
+            with c1: bc_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: bc_key       = st.slider("Chiave", 0.0, 1.0, 0.3, 0.01)
+            with c3: bc_block     = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
+            params = (bc_intensity, bc_key, bc_block)
 
-        elif effect_type == 'c64':
+        elif effect_type == 'retro_palette':
             c1,c2,c3 = st.columns(3)
-            with c1: c64_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-            with c2: c64_dither    = st.slider("Dither", 0.0, 1.0, 0.5, 0.05)
-            with c3: c64_pixel     = st.slider("Pixel size", 0.1, 3.0, 1.0, 0.1)
-            params = (c64_intensity, c64_dither, c64_pixel)
+            with c1: rp_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: rp_dither    = st.slider("Dither", 0.0, 1.0, 0.5, 0.05)
+            with c3: rp_pixel     = st.slider("Pixel size", 0.1, 3.0, 1.0, 0.1)
+            params = (rp_intensity, rp_dither, rp_pixel)
 
         elif effect_type == 'channel_shift':
             c1,c2,c3 = st.columns(3)
@@ -2945,10 +2968,10 @@ if uploaded_file is not None:
                     pf = glitch_bitmap_sort(frame_live, *params)
                 elif effect_type == 'rutt_etra':
                     pf = glitch_rutt_etra(frame_live, *params)
-                elif effect_type == 'pixelock':
-                    pf = glitch_pixelock(frame_live, *params)
-                elif effect_type == 'c64':
-                    pf = glitch_c64(frame_live, *params)
+                elif effect_type == 'block_cipher':
+                    pf = glitch_block_cipher(frame_live, *params)
+                elif effect_type == 'retro_palette':
+                    pf = glitch_retro_palette(frame_live, *params)
                 elif effect_type == 'channel_shift':
                     pf = glitch_channel_shift(frame_live, *params)
                 elif effect_type == 'datamosh':
@@ -3111,7 +3134,7 @@ if uploaded_file is not None:
 
                 video_stem   = os.path.splitext(uploaded_file.name)[0]
                 effect_label = {
-                    "pixel_sort":"PixelSort","bitmap_sort":"BitmapSort","rutt_etra":"RuttEtra","pixelock":"Pixelock","c64":"C64Yourself","channel_shift":"ChannelShift",
+                    "pixel_sort":"PixelSort","bitmap_sort":"BitmapSort","rutt_etra":"RuttEtra","block_cipher":"BlockCipher","retro_palette":"RetroPalette16","channel_shift":"ChannelShift",
                     "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
                     "slice_shift":"SliceShift","echo_smear":"EchoSmear",
                     "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
