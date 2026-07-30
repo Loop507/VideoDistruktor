@@ -114,6 +114,8 @@ def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity
     STRATEGIES = {
         'pixel_sort':    [('rms', 0), ('high_freq', 1)],   # intensità↑ con rms, soglia↑ con high
         'bitmap_sort':   [('rms', 0), ('high_freq', 1)],   # stessa logica di pixel_sort
+        'rutt_etra':     [('rms', 0), ('low_freq', 2)],    # intensità↑ con rms, displacement↑ con bassi
+        'pixelock':      [('beats', 0)],                    # shuffle intensifica sui beat
         'channel_shift': [('rms', 0), ('beats', 1)],
         'datamosh':      [('low_freq', 0), ('rms', 2)],     # blocchi grandi sui bassi, chaos su rms
         'byte_corrupt':  [('rms', 0), ('beats', 1)],
@@ -603,6 +605,68 @@ def glitch_bitmap_sort(frame, intensity=1.0, threshold=0.3, direction=0.3):
                 arr[:, 1:][mask]  = right * (1 - blend) + left * blend
 
         return np.clip(arr, 0, 255).astype(np.uint8)
+    except Exception:
+        return frame
+
+def glitch_rutt_etra(frame, intensity=1.0, line_spacing=1.0, displacement=1.0):
+    """Emulazione Rutt-Etra (scan processor video anni '70, tecnica di dominio pubblico):
+    ogni scanline è ridisegnata come polilinea la cui posizione verticale è spinta dalla
+    luminosità locale (le zone chiare 'tirano su' il raster) — il classico wireframe
+    pseudo-3D del synth video analogico."""
+    try:
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        step = int(np.clip(round(18 / max(0.2, line_spacing)), 2, 60))
+        max_disp = displacement * (h * 0.15)
+        canvas = np.zeros_like(frame)
+
+        xs = np.arange(w)
+        for y in range(0, h, step):
+            lum_row = gray[y, :]
+            new_ys = np.clip(y - lum_row * max_disp, 0, h - 1).astype(np.int32)
+            colors = frame[y, :]
+            pts = np.stack([xs, new_ys], axis=1).reshape(-1, 1, 2)
+            avg_color = tuple(int(c) for c in colors.mean(axis=0))
+            cv2.polylines(canvas, [pts], isClosed=False, color=avg_color, thickness=1, lineType=cv2.LINE_AA)
+
+        blend = float(np.clip(0.3 + 0.5 * intensity, 0.0, 1.0))
+        return cv2.addWeighted(frame, 1 - blend, canvas, blend, 0)
+    except Exception:
+        return frame
+
+def glitch_pixelock(frame, intensity=1.0, key=0.3, block_size=1.0):
+    """Scramble reversibile a blocchi, seedato da una 'chiave' (0-1) — ispirato al concetto
+    di Pixelock di J. Babini (encryption-like glitch: stessa chiave = stesso pattern).
+    Non è una replica del suo codice, che non è pubblicato."""
+    try:
+        arr = frame.copy()
+        h, w = arr.shape[:2]
+        bsize = max(2, int(4 + 24 * (block_size / 3.0)))
+        seed = int(np.clip(key, 0.0, 1.0) * 999983)
+        rng = np.random.RandomState(seed)
+
+        gh, gw = h // bsize, w // bsize
+        if gh < 1 or gw < 1:
+            return frame
+
+        n_blocks = gh * gw
+        frac = np.clip(intensity / 3.0, 0.05, 0.95)
+        n_shuffle = max(2, int(n_blocks * frac))
+
+        idx_pool = rng.choice(n_blocks, size=n_shuffle, replace=False)
+        perm = rng.permutation(idx_pool)
+
+        out = arr.copy()
+        for src_idx, dst_idx in zip(idx_pool, perm):
+            sy, sx = divmod(int(src_idx), gw)
+            dy, dx = divmod(int(dst_idx), gw)
+            sy0, sx0 = sy * bsize, sx * bsize
+            dy0, dx0 = dy * bsize, dx * bsize
+            block = arr[sy0:sy0+bsize, sx0:sx0+bsize].copy()
+            if block.size and rng.rand() < 0.3:
+                block = np.roll(block, shift=rng.randint(1, 3), axis=2 if block.ndim == 3 else 0)
+            out[dy0:dy0+bsize, dx0:dx0+bsize] = block
+        return out
     except Exception:
         return frame
 
@@ -1348,6 +1412,8 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
             fn_map = {
                 'pixel_sort':    lambda f: glitch_pixel_sort(f, *cp),
                 'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *cp),
+                'rutt_etra':     lambda f: glitch_rutt_etra(f, *cp),
+                'pixelock':      lambda f: glitch_pixelock(f, *cp),
                 'channel_shift': lambda f: glitch_channel_shift(f, *cp),
                 'datamosh':      lambda f: glitch_datamosh(f, prev_frame, *cp),
                 'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *cp),
@@ -1727,6 +1793,8 @@ SESSION_EFFECT_PARAM_SPEC = {
     # effetto: [(label, min, max, default, step), ...] — stessi valori della UI video-singolo
     'pixel_sort':    [("Intensità",0.1,3.0,1.0,0.1), ("Soglia luma",0.1,1.0,0.5,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
     'bitmap_sort':   [("Intensità",0.1,3.0,1.0,0.1), ("Soglia",0.05,1.0,0.3,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
+    'rutt_etra':     [("Intensità",0.1,3.0,1.0,0.1), ("Spaziatura linee",0.1,3.0,1.0,0.1), ("Displacement",0.1,3.0,1.0,0.1)],
+    'pixelock':      [("Intensità",0.1,3.0,1.0,0.1), ("Chiave",0.0,1.0,0.3,0.01), ("Block size",0.1,3.0,1.0,0.1)],
     'channel_shift': [("Intensità",0.1,3.0,1.0,0.1), ("Spread",0.1,3.0,1.0,0.1), ("Verticale",0.0,1.0,0.3,0.05)],
     'datamosh':      [("Intensità",0.1,3.0,1.0,0.1), ("Block size",0.1,3.0,1.0,0.1), ("Chaos",0.1,3.0,1.0,0.1)],
     'byte_corrupt':  [("Intensità",0.1,3.0,1.0,0.1), ("Chunk size",0.1,3.0,1.0,0.1), ("Random",0.0,1.0,0.7,0.05)],
@@ -1750,7 +1818,7 @@ SESSION_EFFECT_PARAM_SPEC = {
 }
 SESSION_EFFECTS = list(SESSION_EFFECT_PARAM_SPEC.keys()) + ['combined', 'random']
 SESSION_EFFECT_LABELS = {
-    "pixel_sort":"🔀 Pixel Sort", "bitmap_sort":"🧬 Bitmap Sort", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
+    "pixel_sort":"🔀 Pixel Sort", "bitmap_sort":"🧬 Bitmap Sort", "rutt_etra":"📉 Rutt-Etra", "pixelock":"🔐 Pixelock", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
     "byte_corrupt":"🦠 Byte Corrupt", "slice_shift":"✂️ Slice Shift", "echo_smear":"👻 Echo Smear",
     "rgb_wave":"🌊 RGB Wave", "mirror_blocks":"🪞 Mirror Blocks", "color_quantize":"🎨 Color Quantize",
     "moire":"🕸️ Moiré Pattern", "feedback_loop":"🔁 Feedback Loop", "pixel_drift":"💧 Pixel Drift",
@@ -1972,6 +2040,8 @@ def apply_effect_preview(frame, effect_type, params):
         fn_map = {
             'pixel_sort':    lambda f: glitch_pixel_sort(f, *params),
             'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *params),
+            'rutt_etra':     lambda f: glitch_rutt_etra(f, *params),
+            'pixelock':      lambda f: glitch_pixelock(f, *params),
             'channel_shift': lambda f: glitch_channel_shift(f, *params),
             'datamosh':      lambda f: glitch_datamosh(f, f, *params),
             'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *params),
@@ -2271,7 +2341,7 @@ if uploaded_file is not None:
         # ── EFFETTO ──────────────────────────────────────────────
         effect_type = st.selectbox(
             "🎭 Effetto glitch:",
-            ["pixel_sort", "bitmap_sort", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
+            ["pixel_sort", "bitmap_sort", "rutt_etra", "pixelock", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
              "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
              "moire", "feedback_loop", "pixel_drift",
              "slit_scan", "thermal", "ascii_glitch", "halftone", "chroma_pulse",
@@ -2279,6 +2349,8 @@ if uploaded_file is not None:
             format_func=lambda x: {
                 "pixel_sort":    "🔀 Pixel Sort",
                 "bitmap_sort":   "🧬 Bitmap Sort",
+                "rutt_etra":     "📉 Rutt-Etra",
+                "pixelock":      "🔐 Pixelock",
                 "channel_shift": "🌈 Channel Shift",
                 "datamosh":      "💾 Datamosh",
                 "byte_corrupt":  "🦠 Byte Corrupt",
@@ -2321,6 +2393,20 @@ if uploaded_file is not None:
             with c2: bs_threshold = st.slider("Soglia", 0.05, 1.0, 0.3, 0.05)
             with c3: bs_direction = st.slider("Direzione", 0.0, 1.0, 0.3, 0.05)
             params = (bs_intensity, bs_threshold, bs_direction)
+
+        elif effect_type == 'rutt_etra':
+            c1,c2,c3 = st.columns(3)
+            with c1: re_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: re_spacing   = st.slider("Spaziatura linee", 0.1, 3.0, 1.0, 0.1)
+            with c3: re_disp      = st.slider("Displacement", 0.1, 3.0, 1.0, 0.1)
+            params = (re_intensity, re_spacing, re_disp)
+
+        elif effect_type == 'pixelock':
+            c1,c2,c3 = st.columns(3)
+            with c1: pl_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: pl_key       = st.slider("Chiave", 0.0, 1.0, 0.3, 0.01)
+            with c3: pl_block     = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
+            params = (pl_intensity, pl_key, pl_block)
 
         elif effect_type == 'channel_shift':
             c1,c2,c3 = st.columns(3)
@@ -2798,6 +2884,10 @@ if uploaded_file is not None:
                     pf = glitch_pixel_sort(frame_live, *params)
                 elif effect_type == 'bitmap_sort':
                     pf = glitch_bitmap_sort(frame_live, *params)
+                elif effect_type == 'rutt_etra':
+                    pf = glitch_rutt_etra(frame_live, *params)
+                elif effect_type == 'pixelock':
+                    pf = glitch_pixelock(frame_live, *params)
                 elif effect_type == 'channel_shift':
                     pf = glitch_channel_shift(frame_live, *params)
                 elif effect_type == 'datamosh':
@@ -2960,7 +3050,7 @@ if uploaded_file is not None:
 
                 video_stem   = os.path.splitext(uploaded_file.name)[0]
                 effect_label = {
-                    "pixel_sort":"PixelSort","bitmap_sort":"BitmapSort","channel_shift":"ChannelShift",
+                    "pixel_sort":"PixelSort","bitmap_sort":"BitmapSort","rutt_etra":"RuttEtra","pixelock":"Pixelock","channel_shift":"ChannelShift",
                     "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
                     "slice_shift":"SliceShift","echo_smear":"EchoSmear",
                     "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
