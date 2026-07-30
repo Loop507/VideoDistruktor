@@ -1843,7 +1843,7 @@ def build_report(original_name, original_size_mb, output_size_mb,
 SESSION_EFFECT_PARAM_SPEC = {
     # effetto: [(label, min, max, default, step), ...] — stessi valori della UI video-singolo
     'pixel_sort':    [("Intensità",0.1,3.0,1.0,0.1), ("Soglia luma",0.1,1.0,0.5,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
-    'bitmap_sort':   [("Intensità",0.1,3.0,1.0,0.1), ("Soglia",0.05,1.0,0.3,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
+    'bitmap_sort':   [("Intensità",0.1,3.0,1.5,0.1), ("Soglia",0.02,1.0,0.08,0.01), ("Direzione",0.0,1.0,0.3,0.05)],
     'rutt_etra':     [("Intensità",0.1,3.0,1.0,0.1), ("Spaziatura linee",0.1,3.0,1.0,0.1), ("Displacement",0.1,3.0,1.0,0.1)],
     'block_cipher':      [("Intensità",0.1,3.0,1.0,0.1), ("Chiave",0.0,1.0,0.3,0.01), ("Block size",0.1,3.0,1.0,0.1)],
     'retro_palette':           [("Intensità",0.1,3.0,1.0,0.1), ("Dither",0.0,1.0,0.5,0.05), ("Pixel size",0.1,3.0,1.0,0.1)],
@@ -2464,8 +2464,8 @@ if uploaded_file is not None:
 
         elif effect_type == 'bitmap_sort':
             c1,c2,c3 = st.columns(3)
-            with c1: bs_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
-            with c2: bs_threshold = st.slider("Soglia", 0.05, 1.0, 0.3, 0.05)
+            with c1: bs_intensity = st.slider("Intensità", 0.1, 3.0, 1.5, 0.1)
+            with c2: bs_threshold = st.slider("Soglia", 0.02, 1.0, 0.08, 0.01)
             with c3: bs_direction = st.slider("Direzione", 0.0, 1.0, 0.3, 0.05)
             params = (bs_intensity, bs_threshold, bs_direction)
 
