@@ -116,6 +116,7 @@ def apply_audio_reactive(params, effect_type, audio_env, frame_idx, ar_intensity
         'bitmap_sort':   [('rms', 0), ('high_freq', 1)],   # stessa logica di pixel_sort
         'rutt_etra':     [('rms', 0), ('low_freq', 2)],    # intensità↑ con rms, displacement↑ con bassi
         'pixelock':      [('beats', 0)],                    # shuffle intensifica sui beat
+        'c64':           [('rms', 0), ('high_freq', 1)],    # blend↑ con rms, dither↑ con high
         'channel_shift': [('rms', 0), ('beats', 1)],
         'datamosh':      [('low_freq', 0), ('rms', 2)],     # blocchi grandi sui bassi, chaos su rms
         'byte_corrupt':  [('rms', 0), ('beats', 1)],
@@ -667,6 +668,53 @@ def glitch_pixelock(frame, intensity=1.0, key=0.3, block_size=1.0):
                 block = np.roll(block, shift=rng.randint(1, 3), axis=2 if block.ndim == 3 else 0)
             out[dy0:dy0+bsize, dx0:dx0+bsize] = block
         return out
+    except Exception:
+        return frame
+
+# Palette Commodore 64 (16 colori, valori RGB misurati da Philip "Pepto" Timmermann —
+# dati tecnici di riferimento standard, non contenuto creativo)
+C64_PALETTE = np.array([
+    [0,0,0],[255,255,255],[104,55,43],[112,164,178],
+    [111,61,134],[88,141,67],[53,40,121],[184,199,111],
+    [111,79,37],[67,57,0],[154,103,89],[68,68,68],
+    [108,108,108],[154,210,132],[108,94,181],[149,149,149]
+], dtype=np.float32)
+
+_BAYER4 = np.array([
+    [ 0, 8, 2,10],
+    [12, 4,14, 6],
+    [ 3,11, 1, 9],
+    [15, 7,13, 5]
+], dtype=np.float32) / 16.0 - 0.5
+
+def glitch_c64(frame, intensity=1.0, dither=0.5, pixel_size=1.0):
+    """C64 Yourself: pixelizzazione + quantizzazione sulla palette fissa a 16 colori del
+    Commodore 64, con dithering ordinato (Bayer) opzionale. Il quantizing avviene
+    sull'immagine già pixelizzata (bassa risoluzione) per performance — evita di calcolare
+    le distanze-palette su ogni pixel dell'immagine intera."""
+    try:
+        h, w = frame.shape[:2]
+        block = max(1, int(2 + 14 * (pixel_size / 3.0)))
+        sw, sh = max(1, w // block), max(1, h // block)
+        small = cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_AREA)
+
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB).astype(np.float32)
+
+        if dither > 0.5:
+            tile = np.tile(_BAYER4, (sh // 4 + 1, sw // 4 + 1))[:sh, :sw]
+            spread = 40.0 * (dither - 0.5) * 2
+            rgb = rgb + tile[..., None] * spread
+
+        flat = rgb.reshape(-1, 3)
+        dists = np.sum((flat[:, None, :] - C64_PALETTE[None, :, :]) ** 2, axis=2)
+        nearest = np.argmin(dists, axis=1)
+        quantized_small = C64_PALETTE[nearest].reshape(sh, sw, 3).astype(np.uint8)
+
+        quantized_bgr_small = cv2.cvtColor(quantized_small, cv2.COLOR_RGB2BGR)
+        pixelated = cv2.resize(quantized_bgr_small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        blend = float(np.clip(0.3 + 0.3 * intensity, 0.0, 1.0))
+        return cv2.addWeighted(frame, 1 - blend, pixelated, blend, 0)
     except Exception:
         return frame
 
@@ -1414,6 +1462,7 @@ def process_video(video_path, effect_type, params, max_frames=None, audio_mode="
                 'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *cp),
                 'rutt_etra':     lambda f: glitch_rutt_etra(f, *cp),
                 'pixelock':      lambda f: glitch_pixelock(f, *cp),
+                'c64':           lambda f: glitch_c64(f, *cp),
                 'channel_shift': lambda f: glitch_channel_shift(f, *cp),
                 'datamosh':      lambda f: glitch_datamosh(f, prev_frame, *cp),
                 'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *cp),
@@ -1795,6 +1844,7 @@ SESSION_EFFECT_PARAM_SPEC = {
     'bitmap_sort':   [("Intensità",0.1,3.0,1.0,0.1), ("Soglia",0.05,1.0,0.3,0.05), ("Direzione",0.0,1.0,0.3,0.05)],
     'rutt_etra':     [("Intensità",0.1,3.0,1.0,0.1), ("Spaziatura linee",0.1,3.0,1.0,0.1), ("Displacement",0.1,3.0,1.0,0.1)],
     'pixelock':      [("Intensità",0.1,3.0,1.0,0.1), ("Chiave",0.0,1.0,0.3,0.01), ("Block size",0.1,3.0,1.0,0.1)],
+    'c64':           [("Intensità",0.1,3.0,1.0,0.1), ("Dither",0.0,1.0,0.5,0.05), ("Pixel size",0.1,3.0,1.0,0.1)],
     'channel_shift': [("Intensità",0.1,3.0,1.0,0.1), ("Spread",0.1,3.0,1.0,0.1), ("Verticale",0.0,1.0,0.3,0.05)],
     'datamosh':      [("Intensità",0.1,3.0,1.0,0.1), ("Block size",0.1,3.0,1.0,0.1), ("Chaos",0.1,3.0,1.0,0.1)],
     'byte_corrupt':  [("Intensità",0.1,3.0,1.0,0.1), ("Chunk size",0.1,3.0,1.0,0.1), ("Random",0.0,1.0,0.7,0.05)],
@@ -1818,7 +1868,7 @@ SESSION_EFFECT_PARAM_SPEC = {
 }
 SESSION_EFFECTS = list(SESSION_EFFECT_PARAM_SPEC.keys()) + ['combined', 'random']
 SESSION_EFFECT_LABELS = {
-    "pixel_sort":"🔀 Pixel Sort", "bitmap_sort":"🧬 Bitmap Sort", "rutt_etra":"📉 Rutt-Etra", "pixelock":"🔐 Pixelock", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
+    "pixel_sort":"🔀 Pixel Sort", "bitmap_sort":"🧬 Bitmap Sort", "rutt_etra":"📉 Rutt-Etra", "pixelock":"🔐 Pixelock", "c64":"🕹️ C64 Yourself", "channel_shift":"🌈 Channel Shift", "datamosh":"💾 Datamosh",
     "byte_corrupt":"🦠 Byte Corrupt", "slice_shift":"✂️ Slice Shift", "echo_smear":"👻 Echo Smear",
     "rgb_wave":"🌊 RGB Wave", "mirror_blocks":"🪞 Mirror Blocks", "color_quantize":"🎨 Color Quantize",
     "moire":"🕸️ Moiré Pattern", "feedback_loop":"🔁 Feedback Loop", "pixel_drift":"💧 Pixel Drift",
@@ -2042,6 +2092,7 @@ def apply_effect_preview(frame, effect_type, params):
             'bitmap_sort':   lambda f: glitch_bitmap_sort(f, *params),
             'rutt_etra':     lambda f: glitch_rutt_etra(f, *params),
             'pixelock':      lambda f: glitch_pixelock(f, *params),
+            'c64':           lambda f: glitch_c64(f, *params),
             'channel_shift': lambda f: glitch_channel_shift(f, *params),
             'datamosh':      lambda f: glitch_datamosh(f, f, *params),
             'byte_corrupt':  lambda f: glitch_byte_corrupt(f, *params),
@@ -2341,7 +2392,7 @@ if uploaded_file is not None:
         # ── EFFETTO ──────────────────────────────────────────────
         effect_type = st.selectbox(
             "🎭 Effetto glitch:",
-            ["pixel_sort", "bitmap_sort", "rutt_etra", "pixelock", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
+            ["pixel_sort", "bitmap_sort", "rutt_etra", "pixelock", "c64", "channel_shift", "datamosh", "byte_corrupt", "slice_shift",
              "echo_smear", "rgb_wave", "mirror_blocks", "color_quantize",
              "moire", "feedback_loop", "pixel_drift",
              "slit_scan", "thermal", "ascii_glitch", "halftone", "chroma_pulse",
@@ -2351,6 +2402,7 @@ if uploaded_file is not None:
                 "bitmap_sort":   "🧬 Bitmap Sort",
                 "rutt_etra":     "📉 Rutt-Etra",
                 "pixelock":      "🔐 Pixelock",
+                "c64":           "🕹️ C64 Yourself",
                 "channel_shift": "🌈 Channel Shift",
                 "datamosh":      "💾 Datamosh",
                 "byte_corrupt":  "🦠 Byte Corrupt",
@@ -2407,6 +2459,13 @@ if uploaded_file is not None:
             with c2: pl_key       = st.slider("Chiave", 0.0, 1.0, 0.3, 0.01)
             with c3: pl_block     = st.slider("Block size", 0.1, 3.0, 1.0, 0.1)
             params = (pl_intensity, pl_key, pl_block)
+
+        elif effect_type == 'c64':
+            c1,c2,c3 = st.columns(3)
+            with c1: c64_intensity = st.slider("Intensità", 0.1, 3.0, 1.0, 0.1)
+            with c2: c64_dither    = st.slider("Dither", 0.0, 1.0, 0.5, 0.05)
+            with c3: c64_pixel     = st.slider("Pixel size", 0.1, 3.0, 1.0, 0.1)
+            params = (c64_intensity, c64_dither, c64_pixel)
 
         elif effect_type == 'channel_shift':
             c1,c2,c3 = st.columns(3)
@@ -2888,6 +2947,8 @@ if uploaded_file is not None:
                     pf = glitch_rutt_etra(frame_live, *params)
                 elif effect_type == 'pixelock':
                     pf = glitch_pixelock(frame_live, *params)
+                elif effect_type == 'c64':
+                    pf = glitch_c64(frame_live, *params)
                 elif effect_type == 'channel_shift':
                     pf = glitch_channel_shift(frame_live, *params)
                 elif effect_type == 'datamosh':
@@ -3050,7 +3111,7 @@ if uploaded_file is not None:
 
                 video_stem   = os.path.splitext(uploaded_file.name)[0]
                 effect_label = {
-                    "pixel_sort":"PixelSort","bitmap_sort":"BitmapSort","rutt_etra":"RuttEtra","pixelock":"Pixelock","channel_shift":"ChannelShift",
+                    "pixel_sort":"PixelSort","bitmap_sort":"BitmapSort","rutt_etra":"RuttEtra","pixelock":"Pixelock","c64":"C64Yourself","channel_shift":"ChannelShift",
                     "datamosh":"Datamosh","byte_corrupt":"ByteCorrupt",
                     "slice_shift":"SliceShift","echo_smear":"EchoSmear",
                     "rgb_wave":"RGBWave","mirror_blocks":"MirrorBlocks",
