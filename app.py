@@ -582,11 +582,21 @@ def glitch_bitmap_sort(frame, intensity=1.0, threshold=0.08, direction=0.3):
     passata. Questo crea il vero effetto 'a cascata/scioglimento' (i pixel colano lungo la
     direzione di scan), a differenza di uno swap 'parallelo' che si stabilizza troppo in
     fretta e resta un pattern locale invece che una colatura estesa.
-    NOTA PERFORMANCE: essendo sequenziale (loop riga-per-riga o colonna-per-colonna, non
-    vettorizzabile del tutto), è ~15-20x più lento della versione a swap parallelo — su
-    video lunghi/HD il render richiederà più tempo."""
+    OTTIMIZZAZIONE PERFORMANCE: essendo sequenziale (loop riga-per-riga o colonna-per-colonna,
+    non vettorizzabile del tutto), su video HD (1920x1080) sarebbe troppo lento (~700ms/frame,
+    rischio timeout su Streamlit Cloud). Si processa quindi a risoluzione ridotta (max 480px
+    sul lato lungo) e si fa upscale nearest-neighbor — il dettaglio fine non è comunque
+    percepibile in questo tipo di effetto stilizzato, ma la velocità guadagnata è ~12x."""
     try:
-        arr = frame.astype(np.float32).copy()
+        h0, w0 = frame.shape[:2]
+        max_dim = 480
+        scale = min(1.0, max_dim / max(h0, w0))
+        if scale < 1.0:
+            small = cv2.resize(frame, (max(1, int(w0*scale)), max(1, int(h0*scale))), interpolation=cv2.INTER_AREA)
+        else:
+            small = frame
+
+        arr = small.astype(np.float32).copy()
         thr_255 = np.clip(threshold, 0.01, 1.0) * 255.0
         blend = float(np.clip(0.5 + 0.3 * intensity, 0.0, 1.0))
         passes = int(np.clip(round(1 + intensity * 0.7), 1, 4))
@@ -614,7 +624,10 @@ def glitch_bitmap_sort(frame, intensity=1.0, threshold=0.08, direction=0.3):
                     arr[:, x][mask]     = col_a[mask] * (1 - blend) + col_b[mask] * blend
                     arr[:, x + 1][mask] = col_b[mask] * (1 - blend) + col_a[mask] * blend
 
-        return np.clip(arr, 0, 255).astype(np.uint8)
+        out_small = np.clip(arr, 0, 255).astype(np.uint8)
+        if scale < 1.0:
+            return cv2.resize(out_small, (w0, h0), interpolation=cv2.INTER_NEAREST)
+        return out_small
     except Exception:
         return frame
 
@@ -639,7 +652,7 @@ def glitch_rutt_etra(frame, intensity=1.0, line_spacing=1.0, displacement=1.0):
             ys_plus = np.clip(new_ys + 1, 0, h - 1)
             canvas[ys_plus, xs] = colors  # piccolo spessore per continuità visiva
 
-        blend = float(np.clip(0.4 + 0.5 * intensity, 0.0, 1.0))
+        blend = float(np.clip(intensity / 3.0, 0.02, 1.0))
         return cv2.addWeighted(frame, 1 - blend, canvas, blend, 0)
     except Exception:
         return frame
@@ -724,7 +737,7 @@ def glitch_retro_palette(frame, intensity=1.0, dither=0.5, pixel_size=1.0):
         quantized_bgr_small = cv2.cvtColor(quantized_small, cv2.COLOR_RGB2BGR)
         pixelated = cv2.resize(quantized_bgr_small, (w, h), interpolation=cv2.INTER_NEAREST)
 
-        blend = float(np.clip(0.3 + 0.3 * intensity, 0.0, 1.0))
+        blend = float(np.clip(intensity / 3.0, 0.02, 1.0))
         return cv2.addWeighted(frame, 1 - blend, pixelated, blend, 0)
     except Exception:
         return frame
@@ -1998,8 +2011,12 @@ def build_xfade_chain(clips, crossfades, transitions, audio_xfade):
     return current["path"]
 
 
-def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio, target_fps, audio_xfade):
-    """Applica l'effetto (globale o individuale) a ogni clip, normalizza fps/risoluzione, poi le monta con crossfade."""
+def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio, target_fps, audio_xfade,
+                          kf_start=None, kf_mid=None, kf_end=None, global_audio_file=None):
+    """Applica l'effetto (globale o individuale) a ogni clip, normalizza fps/risoluzione, poi le monta con crossfade.
+    Se kf_start/mid/end sono forniti, costruisce UN SOLO inviluppo di intensità sulla durata TOTALE della
+    sessione (non clip per clip) e ne passa la fetta corrispondente a ciascuna clip in modalità Globale —
+    così l'animazione è continua attraverso tutto il montaggio, non ricomincia ad ogni clip."""
     if len(clips_cfg) < 2:
         st.error("Servono almeno 2 clip per montare una sessione.")
         return None
@@ -2010,6 +2027,25 @@ def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio,
     stat = st.empty()
     tw, th = SESSION_TARGET_SIZES.get(aspect_ratio, (0, 0))
 
+    use_global_animation = kf_start is not None and kf_mid is not None and kf_end is not None
+    session_envelope = None
+    cumulative_frames = 0
+    if use_global_animation:
+        import pandas as pd
+        # Pre-calcola le durate di TUTTE le clip prima di processarle, per costruire la timeline totale
+        clip_frame_counts = []
+        for entry in clips_cfg:
+            tmp_probe = os.path.join(tmp_dir, f"probe_{entry['key']}.mp4")
+            with open(tmp_probe, "wb") as f:
+                f.write(entry["file"].getbuffer())
+            _, _, _, n_frames, _ = get_video_info(tmp_probe)
+            clip_frame_counts.append(max(1, n_frames))
+        total_session_frames = sum(clip_frame_counts)
+        dur_est_total = total_session_frames / target_fps
+        kf_df = pd.DataFrame({"Secondo": [0.0, dur_est_total / 2, dur_est_total],
+                              "Intensita'": [kf_start, kf_mid, kf_end]})
+        session_envelope = interpolate_keyframes(kf_df, target_fps, total_session_frames)
+
     for i, entry in enumerate(clips_cfg):
         stat.text(f"🎬 Clip {i+1}/{len(clips_cfg)}: {entry['name']} — applico effetto...")
         in_path = os.path.join(tmp_dir, f"in_{i}.mp4")
@@ -2019,8 +2055,16 @@ def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio,
         eff = entry.get("effect_type", global_effect) if entry.get("mode") == "individuale" else global_effect
         prm = entry.get("params", global_params) if entry.get("mode") == "individuale" else global_params
 
+        clip_kf_envelope = None
+        if use_global_animation and entry.get("mode") != "individuale":
+            _, _, _, clip_n_frames, _ = get_video_info(in_path)
+            clip_n_frames = max(1, clip_n_frames)
+            clip_kf_envelope = session_envelope[cumulative_frames: cumulative_frames + clip_n_frames]
+            cumulative_frames += clip_n_frames
+
         proc_path = process_video(in_path, eff, prm, max_frames=None,
-                                  audio_mode="0_originale", aspect_ratio=aspect_ratio)
+                                  audio_mode="0_originale", aspect_ratio=aspect_ratio,
+                                  kf_envelope=clip_kf_envelope)
         if proc_path is None:
             st.error(f"❌ Errore processando {entry['name']}")
             return None
@@ -2074,6 +2118,22 @@ def run_multiclip_session(clips_cfg, global_effect, global_params, aspect_ratio,
         crossfades[i] = max(0.1, min(crossfades[i], max_allowed if max_allowed > 0.1 else 0.1))
 
     final_path = build_xfade_chain(processed, crossfades, transitions, audio_xfade)
+
+    if final_path and global_audio_file is not None:
+        stat.text("🎵 Applico il brano globale alla sessione...")
+        global_audio_path = os.path.join(tmp_dir, "global_audio" + os.path.splitext(global_audio_file.name)[1])
+        with open(global_audio_path, "wb") as f:
+            f.write(global_audio_file.getbuffer())
+        final_with_audio = os.path.join(tmp_dir, "final_with_global_audio.mp4")
+        mx = subprocess.run(["ffmpeg", "-i", final_path, "-i", global_audio_path,
+                            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                            "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                            final_with_audio, "-y"], capture_output=True, text=True)
+        if mx.returncode == 0:
+            final_path = final_with_audio
+        else:
+            st.warning(f"⚠️ Impossibile applicare il brano globale (uso l'audio originale delle clip): {mx.stderr[-300:]}")
+
     prog.progress(1.0)
     if final_path:
         stat.text("✅ Sessione completata!")
@@ -2250,6 +2310,20 @@ def render_session_mode():
     st.markdown("#### 🌐 Effetto globale (usato dalle clip in modalità Globale)")
     global_effect, global_params = render_mini_effect_picker("session_global")
 
+    use_global_animation = st.toggle("⏱️ Anima intensità nel tempo (su tutta la sessione)", value=False, key="session_use_anim")
+    kf_start = kf_mid = kf_end = None
+    if use_global_animation:
+        ck1, ck2, ck3 = st.columns(3)
+        with ck1: kf_start = st.slider("Intensità inizio",  0.0, 3.0, 0.5, 0.1, key="session_kf_start")
+        with ck2: kf_mid   = st.slider("Intensità Centro (metà del tempo)", 0.0, 3.0, 1.0, 0.1, key="session_kf_mid")
+        with ck3: kf_end   = st.slider("Intensità fine",    0.0, 3.0, 1.5, 0.1, key="session_kf_end")
+        st.caption("L'intensità viene interpolata sull'intera durata della sessione montata, non clip per clip — "
+                  "vale solo per le clip in modalità 🌐 Globale.")
+
+    st.markdown("#### 🎵 Brano per l'intera sessione (opzionale)")
+    global_audio_file = st.file_uploader("Carica un brano — sostituirà l'audio di tutte le clip nel montaggio finale",
+                                         type=["mp3", "wav", "aac", "ogg", "flac", "m4a"], key="session_global_audio")
+
     st.markdown(f"#### 🎞️ {len(clips_cfg)} clip in coda")
     for i, entry in enumerate(clips_cfg):
         with st.container(border=True):
@@ -2346,7 +2420,9 @@ def render_session_mode():
             st.error("❌ FFmpeg non disponibile: impossibile montare la sessione.")
             return
         final_path = run_multiclip_session(clips_cfg, global_effect, global_params,
-                                           session_aspect, session_fps, session_audio_xfade)
+                                           session_aspect, session_fps, session_audio_xfade,
+                                           kf_start=kf_start, kf_mid=kf_mid, kf_end=kf_end,
+                                           global_audio_file=global_audio_file)
         if final_path:
             st.session_state.session_output_counter = st.session_state.get("session_output_counter", 0) + 1
             st.session_state.session_result_path = final_path
