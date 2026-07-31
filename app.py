@@ -2320,6 +2320,28 @@ def render_session_mode():
         st.caption("L'intensità viene interpolata sull'intera durata della sessione montata, non clip per clip — "
                   "vale solo per le clip in modalità 🌐 Globale.")
 
+        # Mini-anteprime: un frame dalla prima clip, con l'effetto globale ai 3 valori
+        try:
+            first_entry = clips_cfg[0]
+            prev_tmp_g = os.path.join(tempfile.gettempdir(), f"sess_kf_prev_{first_entry['key']}.mp4")
+            if not os.path.exists(prev_tmp_g):
+                with open(prev_tmp_g, "wb") as f:
+                    f.write(first_entry["file"].getbuffer())
+            cap_kfg = cv2.VideoCapture(prev_tmp_g)
+            tot_kfg = int(cap_kfg.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap_kfg.set(cv2.CAP_PROP_POS_FRAMES, max(0, tot_kfg // 2))
+            ok_kfg, frame_kfg = cap_kfg.read()
+            cap_kfg.release()
+            if ok_kfg and isinstance(global_params, tuple) and len(global_params) >= 1:
+                pk1, pk2, pk3 = st.columns(3)
+                for col, kf_val, cap_label in [(pk1, kf_start, "Inizio"), (pk2, kf_mid, "Centro"), (pk3, kf_end, "Fine")]:
+                    prm_preview = (kf_val,) + tuple(global_params[1:])
+                    thumb_kfg = apply_effect_preview(frame_kfg, global_effect, prm_preview)
+                    with col:
+                        st.image(cv2.cvtColor(thumb_kfg, cv2.COLOR_BGR2RGB), use_container_width=True, caption=cap_label)
+        except Exception:
+            pass
+
     st.markdown("#### 🎵 Brano per l'intera sessione (opzionale)")
     global_audio_file = st.file_uploader("Carica un brano — sostituirà l'audio di tutte le clip nel montaggio finale",
                                          type=["mp3", "wav", "aac", "ogg", "flac", "m4a"], key="session_global_audio")
@@ -2853,6 +2875,24 @@ if uploaded_file is not None:
                 with ck1: kf_start = st.slider("Intensità inizio",  0.0, 3.0, 0.5, 0.1, key="kf_start")
                 with ck2: kf_mid   = st.slider("Intensità Centro (metà del tempo)", 0.0, 3.0, 1.0, 0.1, key="kf_mid")
                 with ck3: kf_end   = st.slider("Intensità fine",    0.0, 3.0, 1.5, 0.1, key="kf_end")
+
+                # Mini-anteprime: un frame preso a metà video, con l'effetto applicato ai 3 valori
+                try:
+                    cap_kf = cv2.VideoCapture(video_path)
+                    tot_kf = int(cap_kf.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap_kf.set(cv2.CAP_PROP_POS_FRAMES, max(0, tot_kf // 2))
+                    ok_kf, frame_kf = cap_kf.read()
+                    cap_kf.release()
+                    if ok_kf:
+                        pk1, pk2, pk3 = st.columns(3)
+                        for col, kf_val, cap_label in [(pk1, kf_start, "Inizio"), (pk2, kf_mid, "Centro"), (pk3, kf_end, "Fine")]:
+                            prm_preview = (kf_val,) + tuple(params[1:])
+                            thumb_kf = apply_effect_preview(frame_kf, effect_type, prm_preview)
+                            with col:
+                                st.image(cv2.cvtColor(thumb_kf, cv2.COLOR_BGR2RGB), use_container_width=True, caption=cap_label)
+                except Exception:
+                    pass
+
                 import pandas as pd
                 cap_tmp = cv2.VideoCapture(video_path)
                 fps_tmp  = cap_tmp.get(cv2.CAP_PROP_FPS) or 24
