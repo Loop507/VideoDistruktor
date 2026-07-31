@@ -652,7 +652,7 @@ def glitch_rutt_etra(frame, intensity=1.0, line_spacing=1.0, displacement=1.0):
             ys_plus = np.clip(new_ys + 1, 0, h - 1)
             canvas[ys_plus, xs] = colors  # piccolo spessore per continuità visiva
 
-        blend = float(np.clip(intensity / 3.0, 0.02, 1.0))
+        blend = float(np.clip((intensity / 3.0) ** 0.4, 0.02, 1.0))
         return cv2.addWeighted(frame, 1 - blend, canvas, blend, 0)
     except Exception:
         return frame
@@ -737,7 +737,7 @@ def glitch_retro_palette(frame, intensity=1.0, dither=0.5, pixel_size=1.0):
         quantized_bgr_small = cv2.cvtColor(quantized_small, cv2.COLOR_RGB2BGR)
         pixelated = cv2.resize(quantized_bgr_small, (w, h), interpolation=cv2.INTER_NEAREST)
 
-        blend = float(np.clip(intensity / 3.0, 0.02, 1.0))
+        blend = float(np.clip((intensity / 3.0) ** 0.4, 0.02, 1.0))
         return cv2.addWeighted(frame, 1 - blend, pixelated, blend, 0)
     except Exception:
         return frame
